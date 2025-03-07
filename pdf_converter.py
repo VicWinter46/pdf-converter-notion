@@ -82,7 +82,10 @@ def process_with_openai(text, config):
     """Process text with OpenAI API - optimized for accurate vendor, brand, and size extraction"""
     try:
         # Set API key from environment or config
-        openai.api_key = config["openai_api_key"]
+        if os.getenv("OPENAI_API_KEY"):
+            openai.api_key = os.getenv("OPENAI_API_KEY")
+        else:
+            openai.api_key = config["openai_api_key"]
             
         # Improved AI prompt (structured extraction)
         enhanced_prompt = f"""
@@ -107,14 +110,13 @@ Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color
 Return ONLY the CSV data in plain text format, without explanations or markdown formatting.
 """
 
-        # Use OpenAI API to process
+        # Use OpenAI API to process - removing the response_format parameter
         response = openai.ChatCompletion.create(
             model=config["model"],
             messages=[
                 {"role": "system", "content": "You are a specialized assistant that accurately extracts structured product data from purchase orders for Shopify import."},
                 {"role": "user", "content": enhanced_prompt}
             ],
-            response_format="text",
             temperature=0.2
         )
         
