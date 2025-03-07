@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # Google Drive folder IDs
 TO_CONVERT_FOLDER_ID = "1idz5ntPGvPpNbWtA6N_tckf_E8xy0ebm"
 CONVERTED_FOLDER_ID = "1p03RvggjPXA0CUOD0gzpD0Ors7e9LQOF"
-PROCESSED_FOLDER_ID = os.getenv("HkrKOWaPrIvz-6yJmgBtDm-VtW2MWKq_")
+PROCESSED_FOLDER_ID = "HkrKOWaPrIvz-6yJmgBtDm-VtW2MWKq_"
 
 # If modifying these scopes, delete the token.pickle file.
 SCOPES = ['https://www.googleapis.com/auth/drive']
