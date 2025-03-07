@@ -22,9 +22,9 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Google Drive folders
-TO_CONVERT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_TO_CONVERT_FOLDER_ID")
-CONVERTED_FOLDER_ID = os.getenv("GOOGLE_DRIVE_CONVERTED_FOLDER_ID")
-PROCESSED_FOLDER_ID = os.getenv("GOOGLE_DRIVE_PROCESSED_FOLDER_ID")
+TO_CONVERT_FOLDER_ID = "1idz5ntPGvPpNbWtA6N_tckf_E8xy0ebm"
+CONVERTED_FOLDER_ID = "1p03RvggjPXA0CUOD0gzpD0Ors7e9LQOF"
+PROCESSED_FOLDER_ID = "1HkrKOWaPrIvz-6yJmgBtDm-VtW2MWKq_"
 
 def get_drive_service():
     """Set up the Google Drive API service"""
