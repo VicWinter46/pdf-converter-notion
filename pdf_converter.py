@@ -79,47 +79,47 @@ def extract_text_from_pdf(pdf_path):
         raise
 
 def process_with_openai(text, config):
-    """Process text with OpenAI API - compatible with older OpenAI library"""
+    """Process text with OpenAI API - optimized for accurate vendor, brand, and size extraction"""
     try:
         # Set API key from environment or config
-        if os.getenv("OPENAI_API_KEY"):
-            openai.api_key = os.getenv("OPENAI_API_KEY")
-        else:
-            openai.api_key = config["openai_api_key"]
+        openai.api_key = config["openai_api_key"]
             
-        # Enhanced prompt
-        enhanced_prompt = """
-Extract product details in CSV format with these EXACT columns:
+        # Improved AI prompt (structured extraction)
+        enhanced_prompt = f"""
+Extract structured product details from the provided purchase order (PO) and return data formatted as CSV.
+
+### **Output Format:**
 Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color
 
-IMPORTANT INSTRUCTIONS:
-- Product Type is CRUCIAL and must be extracted correctly (e.g. Apparel)
-- Wholesale Price MUST be included - this is the cost per item
-- For Size: 
-  * ONLY include sizes that have been ordered (look for quantities greater than 0)
-  * Create separate rows for EACH ordered size
-  * For example, if XS, S, and M are ordered, create three separate entries
-- Include the specific color name if shown (e.g., "AURA FLORAL SAND")
-- Use the Style# as the SKU value
-- If MSRP is missing, use Wholesale Price * 2
+### **Rules for Extraction:**
+- **Vendor = Brand:** Extract the **brand name** and assign it as the vendor.
+- **DO NOT use the customer, billing, or shipping information as the vendor.**
+- **Extract ONLY the sizes and colors listed in the order.** Ignore extra variants.
+- **Ensure the Product Type is accurately classified (e.g., Apparel, Footwear, Accessories).**
+- **If MSRP is missing, use Wholesale Price * 2.**
+- **Ensure every product has a SKU and price.**
+- **Only include "Color" if multiple colors exist for the same product.**
+- **Use double quotes around any field containing commas.**
 
-Text from purchase order:
+### **Text from PO:**
 {text}
 
-Return ONLY the CSV data without any explanations or markdown formatting.
+Return ONLY the CSV data in plain text format, without explanations or markdown formatting.
 """
-        
-        # Use the older API format for version 0.28.0
+
+        # Use OpenAI API to process
         response = openai.ChatCompletion.create(
             model=config["model"],
             messages=[
-                {"role": "system", "content": "You are a specialized assistant that precisely extracts structured product data from purchase orders for Shopify import."},
-                {"role": "user", "content": enhanced_prompt.format(text=text)}
+                {"role": "system", "content": "You are a specialized assistant that accurately extracts structured product data from purchase orders for Shopify import."},
+                {"role": "user", "content": enhanced_prompt}
             ],
+            response_format="text",
             temperature=0.2
         )
         
         return response['choices'][0]['message']['content']
+    
     except Exception as e:
         logger.error(f"Error processing with OpenAI: {str(e)}")
         raise
