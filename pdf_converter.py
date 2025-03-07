@@ -33,19 +33,7 @@ def load_config():
         "model": "gpt-3.5-turbo",
         "output_dir": "output",
         "watch_dir": "watch",
-        "prompt_template": """
-Extract product details in CSV format:
-Product Title,Body (HTML),Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color
-
-If MSRP is missing, use Wholesale Price.
-Sizes should be standardized (XS, S, M, L, XL, 0-3 M, 2T, etc.).
-Only include Color if multiple colors exist.
-
-Text:
-{text}
-
-Return only CSV data.
-"""
+        "prompt_template": "Extract product details in CSV format:\nProduct Title,Body (HTML),Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color\n\nIf MSRP is missing, use Wholesale Price.\nSizes should be standardized (XS, S, M, L, XL, 0-3 M, 2T, etc.).\nOnly include Color if multiple colors exist.\n\nText:\n{text}\n\nReturn only CSV data."
     }
     
     # Check for environment variables first
