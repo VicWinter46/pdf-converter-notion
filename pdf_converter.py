@@ -8,9 +8,6 @@ import sys
 from io import StringIO
 from datetime import datetime
 
-# Check for API key in environment
-if os.getenv("OPENAI_API_KEY"):
-    openai.api_key = os.getenv("OPENAI_API_KEY")
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
@@ -70,49 +67,6 @@ def load_config():
     os.makedirs(default_config["watch_dir"], exist_ok=True)
     
     return default_config
-            "prompt_template": """
-Extract product details in CSV format:
-Product Title,Body (HTML),Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color
-
-If MSRP is missing, use Wholesale Price.
-Sizes should be standardized (XS, S, M, L, XL, 0-3 M, 2T, etc.).
-Only include Color if multiple colors exist.
-
-Text:
-{text}
-
-Return only CSV data.
-"""
-        }
-        
-        os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        with open(config_path, 'w') as f:
-            json.dump(default_config, f, indent=4)
-        
-        logger.warning(f"Created default config file at {config_path}. Please edit it with your API key.")
-        return default_config
-    
-    try:
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-        
-        # Check for required fields
-        required_fields = ["openai_api_key", "model", "output_dir", "watch_dir", "prompt_template"]
-        for field in required_fields:
-            if field not in config or not config[field]:
-                if field == "openai_api_key":
-                    logger.error(f"Missing {field} in config file. Please add it to {config_path}")
-                    raise ValueError(f"Missing {field} in config file")
-        
-        # Create directories if they don't exist
-        os.makedirs(config["output_dir"], exist_ok=True)
-        os.makedirs(config["watch_dir"], exist_ok=True)
-        
-        return config
-    
-    except Exception as e:
-        logger.error(f"Error loading config: {str(e)}")
-        raise
 
 def extract_text_from_pdf(pdf_path):
     """Extract text from a PDF file"""
@@ -167,6 +121,7 @@ Return ONLY the CSV data without any explanations or markdown formatting.
     except Exception as e:
         logger.error(f"Error processing with OpenAI: {str(e)}")
         raise
+
 def parse_csv_data(csv_data):
     """Parse CSV data into a DataFrame with enhanced error handling"""
     try:
@@ -253,15 +208,17 @@ def parse_csv_data(csv_data):
                             logger.info("Trying manual parsing...")
                             # Split by lines and then by commas
                             header_fields = fixed_lines[0].split(',')
+                            header_fields = [field.strip('"').strip() for field in header_fields]
                             data = []
                             
                             for i in range(1, len(fixed_lines)):
                                 row = {}
                                 fields = fixed_lines[i].split(',')
+                                fields = [field.strip('"').strip() for field in fields]
                                 
                                 # Match available fields to header
                                 for j in range(min(len(header_fields), len(fields))):
-                                    row[header_fields[j].strip()] = fields[j].strip()
+                                    row[header_fields[j]] = fields[j]
                                     
                                 data.append(row)
                                 
@@ -284,48 +241,59 @@ def parse_csv_data(csv_data):
 def format_for_shopify(products_df):
     """Format the DataFrame for Shopify import"""
     try:
-                    # Ensure required columns exist
-        required_columns = ["MSRP", "Wholesale Price", "SKU", "Size", "Color", "Product Type"]
+        # Print column names for debugging
+        logger.info(f"DataFrame columns: {products_df.columns.tolist()}")
+        
+        # Ensure required columns exist
+        required_columns = ["Product Title", "Vendor", "Product Type", "SKU", "Wholesale Price", "MSRP", "Size", "Color"]
         for col in required_columns:
             if col not in products_df.columns:
                 products_df[col] = None
+                logger.info(f"Added missing column: {col}")
         
         # Calculate price (use MSRP if available, otherwise use Wholesale Price * 2)
         def calculate_price(row):
             if "MSRP" in row and pd.notna(row["MSRP"]) and row["MSRP"] != 0:
                 return row["MSRP"]
             elif "Wholesale Price" in row and pd.notna(row["Wholesale Price"]):
-                return row["Wholesale Price"] * 2  # Default markup
+                return float(row["Wholesale Price"]) * 2  # Default markup
             else:
                 return None
-        
-  # Map columns to Shopify format - with flexible naming
-column_mapping = {
-    "Product Title": "Title",
-    "Title": "Title",  # In case it's already named "Title"
-    "SKU": "SKU", 
-    "Vendor": "Vendor",
-    "Product Type": "Type",
-    "Type": "Type",  # In case it's already named "Type"
-    "Wholesale Price": "Cost per item",
-    "Cost": "Cost per item",  # Alternative naming
-    "MSRP": "Price",
-    "Price": "Price",  # In case it's already named "Price"
-    "Size": "Option1 value",
-    "Color": "Option2 value"
-}
         
         # Create new DataFrame with Shopify columns
         shopify_df = pd.DataFrame()
         
-        # Map existing columns to Shopify format
-        for old_col, new_col in shopify_mapping.items():
+        # Map columns to Shopify format - with flexible naming
+        column_mapping = {
+            "Product Title": "Title",
+            "Title": "Title",  # In case it's already named "Title"
+            "SKU": "SKU", 
+            "Vendor": "Vendor",
+            "Product Type": "Type",
+            "Type": "Type",  # In case it's already named "Type"
+            "Wholesale Price": "Cost per item",
+            "Cost": "Cost per item",  # Alternative naming
+            "MSRP": "Price",
+            "Price": "Price",  # In case it's already named "Price"
+            "Size": "Option1 value",
+            "Color": "Option2 value"
+        }
+        
+        # Map existing columns
+        for old_col, new_col in column_mapping.items():
             if old_col in products_df.columns:
                 shopify_df[new_col] = products_df[old_col]
+                logger.info(f"Mapped {old_col} to {new_col}")
         
         # Set default values for required fields
-        shopify_df["URL handle"] = shopify_df["Title"].str.lower().str.replace(' ', '-').str.replace('[^a-z0-9-]', '', regex=True)
-        shopify_df["Description"] = shopify_df["Title"]  # As requested, just use title for description
+        if "Title" in shopify_df.columns:
+            shopify_df["URL handle"] = shopify_df["Title"].astype(str).str.lower().str.replace(' ', '-').str.replace('[^a-z0-9-]', '', regex=True)
+            shopify_df["Description"] = shopify_df["Title"]  # As requested, just use title for description
+        else:
+            logger.error("Title column not found in DataFrame")
+            shopify_df["URL handle"] = ""
+            shopify_df["Description"] = ""
+        
         shopify_df["Status"] = "draft"  # Set status to draft
         shopify_df["Option1 name"] = "Size"  # Default option name
         shopify_df["Option2 name"] = "Color"  # Default option name
@@ -334,10 +302,10 @@ column_mapping = {
         
         # Make sure we have a price
         if "Price" not in shopify_df.columns and "Cost per item" in shopify_df.columns:
-            # If no MSRP was found, use Cost per item as Price
-            shopify_df["Price"] = shopify_df["Cost per item"]
+            # If no MSRP was found, use Cost per item * 2
+            shopify_df["Price"] = shopify_df["Cost per item"].astype(float) * 2
         
-        # Select only the columns requested by the user
+        # Select columns for Shopify
         shopify_columns = [
             "Title", "URL handle", "Description", "Vendor", "Type", 
             "Status", "SKU", "Option1 name", "Option1 value", 
@@ -345,23 +313,27 @@ column_mapping = {
             "Continue selling when out of stock", "Product image URL"
         ]
         
-        # Filter only columns that exist in the DataFrame
-        existing_columns = [col for col in shopify_columns if col in shopify_df.columns]
-        
         # For any missing columns in the requested list, add them with empty values
         for col in shopify_columns:
             if col not in shopify_df.columns:
                 shopify_df[col] = ""
+                logger.info(f"Added empty column: {col}")
         
+        # Log DataFrame information
+        logger.info(f"Final DataFrame columns: {shopify_df.columns.tolist()}")
+        logger.info(f"DataFrame shape: {shopify_df.shape}")
+        
+        # Create final CSV
         shopify_csv = shopify_df[shopify_columns]
-        
-        # Log what's being returned for debugging
-        logger.info(f"Returning Shopify CSV with columns: {', '.join(shopify_csv.columns)}")
-        
         return shopify_csv
     
     except Exception as e:
         logger.error(f"Error formatting for Shopify: {str(e)}")
+        # Print more debug info
+        logger.error(f"DataFrame info: {type(products_df)}")
+        if isinstance(products_df, pd.DataFrame):
+            logger.error(f"DataFrame columns: {products_df.columns.tolist()}")
+            logger.error(f"DataFrame sample: {products_df.head().to_dict()}")
         raise
 
 def pdf_to_shopify_csv(pdf_path, output_path=None, config=None):
