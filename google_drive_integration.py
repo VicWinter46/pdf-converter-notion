@@ -2,10 +2,20 @@ import os
 import time
 import tempfile
 import logging
+import json
+import pickle
+
+print(f"Current working directory: {os.getcwd()}")
+print(f"Files in current directory: {os.listdir('.')}")
+print(f"Looking for credentials.json at: {os.path.join(os.getcwd(), 'credentials.json')}")
+print(f"credentials.json exists: {os.path.exists('credentials.json')}")
+print(f"token.pickle exists: {os.path.exists('token.pickle')}")
+print(f"Current working directory: {os.getcwd()}")
+print(f"Looking for token.pickle at: {os.path.join(os.getcwd(), 'token.pickle')}")
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
-from google.oauth2 import service_account
-from dotenv import load_dotenv
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 import io
 
 # Import the PDF converter
@@ -18,43 +28,41 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
-
-# Google Drive folders
+# Google Drive folder IDs
 TO_CONVERT_FOLDER_ID = "1idz5ntPGvPpNbWtA6N_tckf_E8xy0ebm"
 CONVERTED_FOLDER_ID = "1p03RvggjPXA0CUOD0gzpD0Ors7e9LQOF"
-PROCESSED_FOLDER_ID = "1HkrKOWaPrIvz-6yJmgBtDm-VtW2MWKq_"
+PROCESSED_FOLDER_ID = os.getenv("HkrKOWaPrIvz-6yJmgBtDm-VtW2MWKq_")
+
+# If modifying these scopes, delete the token.pickle file.
+SCOPES = ['https://www.googleapis.com/auth/drive']
 
 def get_drive_service():
-    """Set up the Google Drive API service"""
-    try:
-        # Get credentials from environment
-        credentials_json = os.getenv("GOOGLE_DRIVE_CREDENTIALS")
-        service_account_info = None
-        
-        if credentials_json:
-            service_account_info = json.loads(credentials_json)
+    """Get an authorized Google Drive service."""
+    creds = None
+    
+    # The token.pickle file stores the user's access and refresh tokens
+    if os.path.exists('token.pickle'):
+        with open('token.pickle', 'rb') as token:
+            creds = pickle.load(token)
+    
+    # If credentials don't exist or are invalid, let the user log in
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
         else:
-            # If not in environment, try to load from file
-            credentials_file = os.getenv("GOOGLE_DRIVE_CREDENTIALS_FILE", "credentials.json")
-            if os.path.exists(credentials_file):
-                with open(credentials_file, 'r') as f:
-                    service_account_info = json.load(f)
+            if not os.path.exists('credentials.json'):
+                logger.error("credentials.json file not found. Please create it first.")
+                return None
+                
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
         
-        if not service_account_info:
-            logger.error("No Google Drive credentials found")
-            return None
-            
-        credentials = service_account.Credentials.from_service_account_info(
-            service_account_info,
-            scopes=['https://www.googleapis.com/auth/drive']
-        )
-        
-        return build('drive', 'v3', credentials=credentials)
-    except Exception as e:
-        logger.error(f"Error setting up Google Drive service: {e}")
-        return None
+        # Save the credentials for the next run
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(creds, token)
+    
+    return build('drive', 'v3', credentials=creds)
 
 def list_files_in_folder(service, folder_id):
     """List PDF files in a Google Drive folder"""
@@ -107,6 +115,7 @@ def upload_file(service, file_path, filename, parent_folder_id):
             fields='id'
         ).execute()
         
+        logger.info(f"Uploaded {filename} to Google Drive with ID: {file.get('id')}")
         return file.get('id')
     except Exception as e:
         logger.error(f"Error uploading file {filename}: {e}")
@@ -127,6 +136,7 @@ def move_file(service, file_id, new_parent_id):
             fields='id, parents'
         ).execute()
         
+        logger.info(f"Moved file {file_id} to folder {new_parent_id}")
         return True
     except Exception as e:
         logger.error(f"Error moving file {file_id}: {e}")
@@ -175,13 +185,47 @@ def process_pdfs():
         except Exception as e:
             logger.error(f"Error processing {file_name}: {e}")
 
+def create_credentials_helper():
+    """Helper function to guide users through creating credentials.json"""
+    print("\n========== GOOGLE DRIVE SETUP GUIDE ==========")
+    print("\n1. Go to https://console.developers.google.com/")
+    print("2. Create a new project (or select an existing one)")
+    print("3. Click 'Enable APIs and Services'")
+    print("4. Search for 'Google Drive API' and enable it")
+    print("5. Go to 'Credentials' in the left sidebar")
+    print("6. Click 'Create Credentials' and select 'OAuth client ID'")
+    print("7. Select 'Desktop app' as the Application type")
+    print("8. Name it 'PDF to CSV Converter' and click 'Create'")
+    print("9. Download the JSON file")
+    print("10. Rename it to 'credentials.json' and place it in this directory")
+    print("\nAfter completing these steps, run this script again.")
+    print("==============================================\n")
+
 if __name__ == "__main__":
+    print("PDF to Shopify CSV Converter - Google Drive Integration")
+    
+    # Check if we have credentials.json
+    if not os.path.exists('credentials.json'):
+        create_credentials_helper()
+        exit(1)
+        
     # Check if we have the required environment variables
     if not TO_CONVERT_FOLDER_ID or not CONVERTED_FOLDER_ID or not PROCESSED_FOLDER_ID:
-        logger.error("Missing required folder IDs")
-    else:
-        # Run in a loop
+        print("\nMissing required folder IDs. Please set these environment variables:")
+        print("GOOGLE_DRIVE_TO_CONVERT_FOLDER_ID - The folder to watch for new PDFs")
+        print("GOOGLE_DRIVE_CONVERTED_FOLDER_ID - The folder to store converted CSVs")
+        print("GOOGLE_DRIVE_PROCESSED_FOLDER_ID - The folder to move processed PDFs to")
+        print("\nYou can find a folder ID in the URL when you open it in Google Drive:")
+        print("https://drive.google.com/drive/folders/YOUR_FOLDER_ID")
+        exit(1)
+        
+    print("\nStarting PDF converter. Press Ctrl+C to stop.")
+    
+    # Run in a loop
+    try:
         while True:
             process_pdfs()
-            logger.info("Sleeping for 1 minute before checking again...")
+            print(f"Checked for PDFs at {time.strftime('%H:%M:%S')}. Waiting 60 seconds...")
             time.sleep(60)  # Check every minute
+    except KeyboardInterrupt:
+        print("\nStopping PDF converter.")
