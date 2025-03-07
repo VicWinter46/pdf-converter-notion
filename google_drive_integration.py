@@ -193,24 +193,26 @@ try:
     move_success = move_file(service, file_id, PROCESSED_FOLDER_ID)
     
     if not move_success:
-        logger.warning(f"Could not move file {file_id} to processed folder, trying to copy instead")
-        # Alternative: Make a copy in the processed folder and delete original
+        logger.warning(f"Could not move file {file_id} to processed folder, attempting to copy instead")
+
+        # Fetch file metadata to create a copy
         file_copy = service.files().get(fileId=file_id, fields='name').execute()
         file_metadata = {
             'name': file_copy.get('name'),
             'parents': [PROCESSED_FOLDER_ID]
         }
-        
+
         # Create a copy in the processed folder
-        service.files().copy(fileId=file_id, body=file_metadata).execute()
-        
-        # Delete the original file
+        copied_file = service.files().copy(fileId=file_id, body=file_metadata).execute()
+        logger.info(f"Successfully copied file {file_id} to processed folder as {copied_file['id']}")
+
+        # Delete the original file to prevent reprocessing
         service.files().delete(fileId=file_id).execute()
-        logger.info(f"Copied and deleted file {file_id} instead of moving")
+        logger.info(f"Deleted original file {file_id} after copying to processed folder")
+
 except Exception as e:
     logger.error(f"Error handling file after processing: {str(e)}")
-    logger.warning(f"File {file_id} was processed but remains in the original folder")
-            
+    logger.warning(f"File {file_id} was processed but remains in the original folder")    
             # Clean up
             os.remove(pdf_path)
             
