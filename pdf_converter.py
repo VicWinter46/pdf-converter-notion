@@ -24,15 +24,64 @@ logger = logging.getLogger(__name__)
 
 # Configuration management
 def load_config():
-    """Load configuration from config.json file or create default if not exists"""
+    """Load configuration from config.json file or environment variables"""
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
     
-    if not os.path.exists(config_path):
-        default_config = {
-            "openai_api_key": "",
-            "model": "gpt-3.5-turbo",
-            "output_dir": "output",
-            "watch_dir": "watch",
+    # Start with default config
+    default_config = {
+        "openai_api_key": "",
+        "model": "gpt-3.5-turbo",
+        "output_dir": "output",
+        "watch_dir": "watch",
+        "prompt_template": """
+Extract product details in CSV format:
+Product Title,Body (HTML),Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color
+
+If MSRP is missing, use Wholesale Price.
+Sizes should be standardized (XS, S, M, L, XL, 0-3 M, 2T, etc.).
+Only include Color if multiple colors exist.
+
+Text:
+{text}
+
+Return only CSV data.
+"""
+    }
+    
+    # Check for environment variables first
+    if os.getenv("OPENAI_API_KEY"):
+        default_config["openai_api_key"] = os.getenv("OPENAI_API_KEY")
+        logger.info("Using OpenAI API key from environment variable")
+    
+    # Try to load from config file
+    try:
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                
+            # Update default config with file config
+            for key, value in config.items():
+                default_config[key] = value
+        else:
+            # Create default config file
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            with open(config_path, 'w') as f:
+                json.dump(default_config, f, indent=4)
+            
+            logger.warning(f"Created default config file at {config_path}. Please edit it with your API key.")
+    except Exception as e:
+        logger.error(f"Error loading config file: {str(e)}")
+    
+    # Final check for required fields
+    if not default_config.get("openai_api_key"):
+        logger.error(f"Missing openai_api_key in config file. Please add it to {config_path}")
+        raise ValueError("Missing openai_api_key in config file")
+    
+    # Create directories if they don't exist
+    os.makedirs(default_config["output_dir"], exist_ok=True)
+    os.makedirs(default_config["watch_dir"], exist_ok=True)
+    
+    return default_config
             "prompt_template": """
 Extract product details in CSV format:
 Product Title,Body (HTML),Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color
@@ -262,17 +311,21 @@ def format_for_shopify(products_df):
             else:
                 return None
         
-        # Map columns to Shopify format
-        shopify_mapping = {
-            "Product Title": "Title",
-            "SKU": "SKU",
-            "Vendor": "Vendor",
-            "Product Type": "Type",
-            "Wholesale Price": "Cost per item",
-            "MSRP": "Price",
-            "Size": "Option1 value",
-            "Color": "Option2 value"
-        }
+  # Map columns to Shopify format - with flexible naming
+column_mapping = {
+    "Product Title": "Title",
+    "Title": "Title",  # In case it's already named "Title"
+    "SKU": "SKU", 
+    "Vendor": "Vendor",
+    "Product Type": "Type",
+    "Type": "Type",  # In case it's already named "Type"
+    "Wholesale Price": "Cost per item",
+    "Cost": "Cost per item",  # Alternative naming
+    "MSRP": "Price",
+    "Price": "Price",  # In case it's already named "Price"
+    "Size": "Option1 value",
+    "Color": "Option2 value"
+}
         
         # Create new DataFrame with Shopify columns
         shopify_df = pd.DataFrame()
