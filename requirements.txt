@@ -1,0 +1,5 @@
+pdfplumber
+openai
+pandas
+notion-client
+python-dotenv
