@@ -96,17 +96,83 @@ def extract_text_from_pdf(pdf_path):
                             image_links.append(uri)
         
         # Look for potential brand logos or main vendor name at the top of the document
-        # Typically in large text or as a header
         page_lines = text.split('\n')
         potential_vendors = []
         
         # Look for lines with capitalized text that might be vendor names
         for line in page_lines[:20]:  # Check first 20 lines
             # Look for all-caps words that might be brand names
-            if re.match(r'^[A-Z][A-Z\s]+
+            if re.match(r'^[A-Z][A-Z\s]+$', line.strip()) and len(line.strip()) > 3:
+                potential_vendors.append(line.strip())
         
+        # Also look for brand information sections
+        brand_section_pattern = r'(?:Brand|Company|Vendor)(?:\s+Information)?[:\s]+([A-Za-z0-9\s]+)'
+        brand_matches = re.findall(brand_section_pattern, text, re.IGNORECASE)
+        if brand_matches:
+            potential_vendors.extend(brand_matches)
+        
+        # Add vendor detection markers to help the AI
+        if potential_vendors:
+            vendor_text = "\n### POTENTIAL VENDORS ###\n"
+            for vendor in potential_vendors:
+                vendor_text += f"POTENTIAL VENDOR: {vendor.strip()}\n"
+            text = vendor_text + text
+        
+        # Try to extract images from the PDF
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for i, page in enumerate(pdf.pages):
+                    # Extract images if available
+                    if hasattr(page, 'images') and page.images:
+                        for j, img in enumerate(page.images):
+                            document_images.append(f"IMAGE_{i}_{j}")
+        except Exception as img_err:
+            logger.warning(f"Image extraction error: {str(img_err)}")
+        
+        # Add image presence markers to help OpenAI understand there are images
+        if document_images:
+            text += "\n\n### DOCUMENT CONTAINS IMAGES ###\n"
+            for img_ref in document_images:
+                text += f"IMAGE REFERENCE: {img_ref}\n"
+        
+        # Add image links to the text so OpenAI can find them
+        if image_links:
+            text += "\n\n### IMAGE LINKS ###\n"
+            for link in image_links:
+                text += f"IMAGE URL: {link}\n"
+        
+        # Use enhanced extraction with pdfplumber to find quantity information
+        with pdfplumber.open(pdf_path) as pdf:
+            plumber_text = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
+            
+            # Look for size/quantity patterns like "XS: 1" or similar
+            size_qty_patterns = [
+                r'(XXS|XS|S|M|L|XL|XXL)\s*[:=]?\s*(\d+)',  # XS: 1
+                r'(XXS|XS|S|M|L|XL|XXL)\s+(\d+)',          # XS 1
+                r'Qty\s*[:=]?\s*(\d+)',                    # Qty: 1
+                r'Quantity\s*[:=]?\s*(\d+)'                # Quantity: 1
+            ]
+            
+            # Add special markers for quantities detected
+            quantity_text = "\n### QUANTITY INFORMATION ###\n"
+            has_quantities = False
+            
+            for pattern in size_qty_patterns:
+                qty_matches = re.findall(pattern, plumber_text, re.IGNORECASE)
+                if qty_matches:
+                    has_quantities = True
+                    for match in qty_matches:
+                        if len(match) == 2:  # Size and quantity
+                            quantity_text += f"SIZE: {match[0]} QTY: {match[1]}\n"
+                        else:  # Just quantity
+                            quantity_text += f"QTY: {match[0]}\n"
+            
+            if has_quantities:
+                text += quantity_text
+        
+        return text
     except Exception as e:
-        logger.error(f"Error in advanced extraction: {str(e)}")
+        logger.error(f"Error in PDF extraction: {str(e)}")
         # Fall back to regular text extraction
         with pdfplumber.open(pdf_path) as pdf:
             text = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
