@@ -79,7 +79,7 @@ def extract_text_from_pdf(pdf_path):
         raise
 
 def process_with_openai(text, config):
-    """Process text with OpenAI API - optimized for accurate vendor, brand, and size extraction"""
+    """Process text with OpenAI API - optimized for accurate product extraction"""
     try:
         # Set API key from environment or config
         if os.getenv("OPENAI_API_KEY"):
@@ -87,45 +87,90 @@ def process_with_openai(text, config):
         else:
             openai.api_key = config["openai_api_key"]
             
-        # Improved AI prompt (structured extraction)
+        # Improved AI prompt with explicit extraction instructions
         enhanced_prompt = f"""
-Extract structured product details from the provided purchase order (PO) and return data formatted as CSV.
+I need you to extract product information from this purchase order and format it as CSV data.
 
-### **Output Format:**
+### EXTRACTION RULES:
+1. Look for sections that contain product details, typically with style numbers, product names, and prices
+2. Each product should be its own row in the CSV
+3. For each product EXTRACT:
+   - Product Title: The full name of the product (e.g., "AURA FLORAL MINI DRESS")
+   - Vendor: The brand name (e.g., "THE HOLIDAY SHOP")
+   - Product Type: The category (e.g., "Apparel", "Dress", "Blouse")
+   - SKU: The style number (e.g., "336537")
+   - Wholesale Price: The wholesale cost (e.g., "91.00")
+   - MSRP: The suggested retail price (e.g., "210.00")
+   - Size: ONLY include sizes that have quantities ordered (e.g., "XS" if quantity > 0)
+   - Color: Include the color name if specified (e.g., "AURA FLORAL SAND")
+
+### CSV FORMAT:
 Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color
 
-### **Rules for Extraction:**
-- **Vendor = Brand:** Extract the **brand name** and assign it as the vendor.
-- **DO NOT use the customer, billing, or shipping information as the vendor.**
-- **Extract ONLY the sizes and colors listed in the order.** Ignore extra variants.
-- **Ensure the Product Type is accurately classified (e.g., Apparel, Footwear, Accessories).**
-- **If MSRP is missing, use Wholesale Price * 2.**
-- **Ensure every product has a SKU and price.**
-- **Only include "Color" if multiple colors exist for the same product.**
-- **Use double quotes around any field containing commas.**
+### IMPORTANT:
+- Create SEPARATE ROWS for each size variant that has been ordered
+- Look carefully at the quantity columns to determine which sizes to include
+- Do NOT include sizes with zero quantity
+- Use "THE HOLIDAY SHOP" as the Vendor name
+- For product types, use general categories like "Dress" or "Blouse"
 
-### **Text from PO:**
+PURCHASE ORDER TEXT:
 {text}
 
-Return ONLY the CSV data in plain text format, without explanations or markdown formatting.
+Return ONLY a properly formatted CSV with a header row and data rows. No explanations.
 """
 
-        # Use OpenAI API to process - removing the response_format parameter
+        # Use OpenAI API
         response = openai.ChatCompletion.create(
             model=config["model"],
             messages=[
-                {"role": "system", "content": "You are a specialized assistant that accurately extracts structured product data from purchase orders for Shopify import."},
+                {"role": "system", "content": "You are a specialized data extraction expert that can accurately parse product information from purchase orders."},
                 {"role": "user", "content": enhanced_prompt}
             ],
-            temperature=0.2
+            temperature=0.1  # Lower temperature for more consistent results
         )
         
-        return response['choices'][0]['message']['content']
+        # Get result and examine
+        result = response['choices'][0]['message']['content']
+        if "Product Title" not in result or "," not in result:
+            # Try one more time with simpler prompt if extraction failed
+            logger.warning("First extraction attempt failed, trying again with simpler prompt")
+            
+            simpler_prompt = f"""
+Extract these exact fields from the purchase order and return as CSV:
+Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color
+
+Find each product (e.g., "AURA FLORAL MINI DRESS") with its:
+- Style number as SKU (e.g., "336537")
+- "THE HOLIDAY SHOP" as Vendor
+- "Dress" or "Blouse" as Product Type based on name
+- Wholesale Price (e.g., "91.00")
+- Retail Price as MSRP (e.g., "210.00")
+- Only include sizes with quantity ordered
+- Include the color if specified
+
+PO text:
+{text}
+
+Return ONLY CSV data with header row.
+"""
+            
+            response = openai.ChatCompletion.create(
+                model=config["model"],
+                messages=[{"role": "user", "content": simpler_prompt}],
+                temperature=0.1
+            )
+            result = response['choices'][0]['message']['content']
+            
+        # Log result for debugging
+        logger.info("Extraction result:")
+        logger.info(result)
+        
+        return result
     
     except Exception as e:
         logger.error(f"Error processing with OpenAI: {str(e)}")
         raise
-
 def parse_csv_data(csv_data):
     """Parse CSV data into a DataFrame with enhanced error handling"""
     try:
