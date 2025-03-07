@@ -69,17 +69,50 @@ def load_config():
     return default_config
 
 def extract_text_from_pdf(pdf_path):
-    """Extract text from a PDF file"""
+    """Extract text and hyperlinks from a PDF file"""
     try:
+        # First try to extract with PyPDF2 to get hyperlinks
+        from PyPDF2 import PdfReader
+        
+        reader = PdfReader(pdf_path)
+        text = ""
+        image_links = {}
+        
+        # Extract text and find links
+        for page_num, page in enumerate(reader.pages):
+            page_text = page.extract_text()
+            text += page_text + "\n"
+            
+            # Extract annotations that might contain links
+            if '/Annots' in page:
+                for annot in page['/Annots']:
+                    obj = annot.get_object()
+                    if obj['/Subtype'] == '/Link' and '/A' in obj and '/URI' in obj['/A']:
+                        uri = obj['/A']['/URI']
+                        
+                        # Check if it's an image link
+                        if uri.lower().endswith(('.jpg', '.jpeg', '.png', '.gif')):
+                            # Store the link to pass to OpenAI
+                            nearby_text = page_text  # Simplified - in practice we'd want to find nearby text
+                            image_links[nearby_text] = uri
+        
+        # Add a special marker to the text so OpenAI can find the image links
+        if image_links:
+            text += "\n\n### IMAGE LINKS ###\n"
+            for txt, link in image_links.items():
+                text += f"LINK: {link}\n"
+        
+        return text
+        
+    except Exception as e:
+        logger.error(f"Error extracting with PyPDF2: {str(e)}")
+        # Fall back to regular text extraction
         with pdfplumber.open(pdf_path) as pdf:
             text = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
         return text
-    except Exception as e:
-        logger.error(f"Error extracting text from PDF {pdf_path}: {str(e)}")
-        raise
 
 def process_with_openai(text, config):
-    """Process text with OpenAI API - optimized for accurate product extraction"""
+    """Process text with OpenAI API - optimized for accurate product and brand extraction"""
     try:
         # Set API key from environment or config
         if os.getenv("OPENAI_API_KEY"):
@@ -87,77 +120,96 @@ def process_with_openai(text, config):
         else:
             openai.api_key = config["openai_api_key"]
             
-        # Improved AI prompt with explicit extraction instructions
+        # Highly specific prompt that intelligently identifies vendor vs customer
         enhanced_prompt = f"""
-I need you to extract product information from this purchase order and format it as CSV data.
+Extract precise product information from this purchase order in CSV format.
 
-### EXTRACTION RULES:
-1. Look for sections that contain product details, typically with style numbers, product names, and prices
-2. Each product should be its own row in the CSV
-3. For each product EXTRACT:
-   - Product Title: The full name of the product (e.g., "AURA FLORAL MINI DRESS")
-   - Vendor: The brand name (e.g., "THE HOLIDAY SHOP")
-   - Product Type: The category (e.g., "Apparel", "Dress", "Blouse")
-   - SKU: The style number (e.g., "336537")
-   - Wholesale Price: The wholesale cost (e.g., "91.00")
-   - MSRP: The suggested retail price (e.g., "210.00")
-   - Size: ONLY include sizes that have quantities ordered (e.g., "XS" if quantity > 0)
-   - Color: Include the color name if specified (e.g., "AURA FLORAL SAND")
+### CRITICAL EXTRACTION RULES:
+1. VENDOR/BRAND NAME: 
+   - First, identify if this is a wholesale order FROM a brand TO a retailer
+   - The vendor is the BRAND/MANUFACTURER, not the retailer/customer
+   - Look for prominent brand names (often in large text or header)
+   - Examples:
+     * In a PO titled "FARM RIO" with customer "THE HOLIDAY SHOP", the vendor is "FARM RIO"
+     * In a PO from "MADEWELL" to "NORDSTROM", the vendor is "MADEWELL"
+   - The vendor/brand name might be at the top of the document or in a logo
 
-### CSV FORMAT:
-Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color
+2. ORDERED VARIANTS ONLY: 
+   - Examine the size grids/tables and only include sizes with quantities > 0
+   - Each size ordered should be a separate row in the final CSV
 
-### IMPORTANT:
-- Create SEPARATE ROWS for each size variant that has been ordered
-- Look carefully at the quantity columns to determine which sizes to include
-- Do NOT include sizes with zero quantity
-- Use "THE HOLIDAY SHOP" as the Vendor name
-- For product types, use general categories like "Dress" or "Blouse"
+3. STYLE NUMBER: 
+   - Use the style/item number as the SKU (e.g., "336537")
+   - Look for prefixes like "Style #" or similar
+
+4. IMAGES: 
+   - Look for any image URLs in the document
+   - If you find urls ending with .jpg, .png, etc. include them
+   - If no image URLs are found, leave the field empty
+
+### TABLE FORMAT:
+Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product image URL
+
+### IMPORTANT DETAILS:
+- Create a separate row for EACH ORDERED SIZE
+- Categorize product types accurately (Dress, Blouse, Top, etc.)
+- Include exact color names when specified
+- Double-check your vendor identification - it's the BRAND, not the customer/retailer
 
 PURCHASE ORDER TEXT:
 {text}
 
-Return ONLY a properly formatted CSV with a header row and data rows. No explanations.
+Return ONLY properly formatted CSV data with header and data rows. No explanations or other text.
 """
 
-        # Use OpenAI API
+        # Use OpenAI API with specialized prompt
         response = openai.ChatCompletion.create(
             model=config["model"],
             messages=[
-                {"role": "system", "content": "You are a specialized data extraction expert that can accurately parse product information from purchase orders."},
+                {"role": "system", "content": "You are a specialized purchase order extraction system that can accurately distinguish between vendors/brands and customers/retailers."},
                 {"role": "user", "content": enhanced_prompt}
             ],
             temperature=0.1  # Lower temperature for more consistent results
         )
         
-        # Get result and examine
+        # Get result and verify it contains data
         result = response['choices'][0]['message']['content']
-        if "Product Title" not in result or "," not in result:
-            # Try one more time with simpler prompt if extraction failed
-            logger.warning("First extraction attempt failed, trying again with simpler prompt")
+        if "Product Title" not in result or "," not in result or len(result.split('\n')) < 2:
+            # Try one more time with different prompt if extraction failed
+            logger.warning("First extraction attempt failed, trying again with alternate prompt")
             
-            simpler_prompt = f"""
-Extract these exact fields from the purchase order and return as CSV:
-Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color
+            backup_prompt = f"""
+I need to extract product information from this purchase order in CSV format.
 
-Find each product (e.g., "AURA FLORAL MINI DRESS") with its:
-- Style number as SKU (e.g., "336537")
-- "THE HOLIDAY SHOP" as Vendor
-- "Dress" or "Blouse" as Product Type based on name
-- Wholesale Price (e.g., "91.00")
-- Retail Price as MSRP (e.g., "210.00")
-- Only include sizes with quantity ordered
-- Include the color if specified
+First, determine who is the VENDOR (the brand selling products) vs who is the CUSTOMER (the retailer buying products):
+- In wholesale orders, the vendor is the MANUFACTURER/BRAND
+- The order is typically FROM the vendor TO the customer
+- Look for the most prominent brand name - it's often in the header or logo
 
-PO text:
+Example:
+- If you see "FARM RIO" prominently displayed with "THE HOLIDAY SHOP" as the ship-to address, then FARM RIO is the vendor
+- If you see "ANTHROPOLOGIE" ordering from "FREE PEOPLE", then FREE PEOPLE is the vendor
+
+For each product:
+1. Extract the full product name
+2. Include the identified vendor name (the brand)
+3. Categorize the product type (Dress, Blouse, etc.)
+4. Extract the style number as SKU
+5. Get wholesale and retail prices
+6. Create separate rows for EACH SIZE that has a quantity ordered
+7. Include color information
+8. Include any image URLs found in the document
+
+Analyze the PO text:
 {text}
 
-Return ONLY CSV data with header row.
+Return ONLY the CSV data with this header:
+Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product image URL
 """
             
             response = openai.ChatCompletion.create(
                 model=config["model"],
-                messages=[{"role": "user", "content": simpler_prompt}],
+                messages=[{"role": "user", "content": backup_prompt}],
                 temperature=0.1
             )
             result = response['choices'][0]['message']['content']
