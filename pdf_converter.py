@@ -93,13 +93,15 @@ Extract product details in CSV format with these EXACT columns:
 Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color
 
 IMPORTANT INSTRUCTIONS:
-- Product Type is CRUCIAL and must be extracted correctly (e.g. Apparel, Footwear, Accessories, etc.)
+- Product Type is CRUCIAL and must be extracted correctly (e.g. Apparel)
 - Wholesale Price MUST be included - this is the cost per item
+- For Size: 
+  * ONLY include sizes that have been ordered (look for quantities greater than 0)
+  * Create separate rows for EACH ordered size
+  * For example, if XS, S, and M are ordered, create three separate entries
+- Include the specific color name if shown (e.g., "AURA FLORAL SAND")
+- Use the Style# as the SKU value
 - If MSRP is missing, use Wholesale Price * 2
-- Sizes should be standardized (XS, S, M, L, XL, 0-3 M, 2T, etc.)
-- Only include Color if multiple colors exist
-- Ensure every product has a SKU
-- Use double quotes around any field containing commas
 
 Text from purchase order:
 {text}
