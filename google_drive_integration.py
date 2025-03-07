@@ -191,7 +191,7 @@ def process_pdfs():
 try:
     logger.info(f"Attempting to move file {file_id} to processed folder")
     move_success = move_file(service, file_id, PROCESSED_FOLDER_ID)
-    
+
     if not move_success:
         logger.warning(f"Could not move file {file_id} to processed folder, attempting to copy instead")
 
@@ -211,8 +211,8 @@ try:
         logger.info(f"Deleted original file {file_id} after copying to processed folder")
 
 except Exception as e:
-    logger.error(f"Error handling file after processing: {str(e)}")
-    logger.warning(f"File {file_id} was processed but remains in the original folder")    
+    logger.error(f"Error handling file {file_id}: {e}")
+    logger.warning(f"File {file_id} was processed but remains in the original folder")
             # Clean up
             os.remove(pdf_path)
             
