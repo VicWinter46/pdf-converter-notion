@@ -88,14 +88,15 @@ def extract_text_from_pdf(pdf_path):
         raise
 
 def process_with_openai(text, config):
-    """Process text with OpenAI API - compatible with newer OpenAI library"""
+    """Process text with OpenAI API - compatible with older OpenAI library"""
     try:
-        # For OpenAI API version 1.0.0 and higher
-        from openai import OpenAI
-        
-        client = OpenAI(api_key=config["openai_api_key"])
-        
-        # Use an enhanced prompt to ensure we get cost data and product type
+        # Set API key from environment or config
+        if os.getenv("OPENAI_API_KEY"):
+            openai.api_key = os.getenv("OPENAI_API_KEY")
+        else:
+            openai.api_key = config["openai_api_key"]
+            
+        # Enhanced prompt
         enhanced_prompt = """
 Extract product details in CSV format with these EXACT columns:
 Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color
@@ -108,7 +109,6 @@ IMPORTANT INSTRUCTIONS:
 - Only include Color if multiple colors exist
 - Ensure every product has a SKU
 - Use double quotes around any field containing commas
-- Ensure proper CSV formatting with exactly 8 columns per row
 
 Text from purchase order:
 {text}
@@ -116,17 +116,17 @@ Text from purchase order:
 Return ONLY the CSV data without any explanations or markdown formatting.
 """
         
-        # Use the enhanced prompt instead of the template from config
-        response = client.chat.completions.create(
+        # Use the older API format for version 0.28.0
+        response = openai.ChatCompletion.create(
             model=config["model"],
             messages=[
                 {"role": "system", "content": "You are a specialized assistant that precisely extracts structured product data from purchase orders for Shopify import."},
                 {"role": "user", "content": enhanced_prompt.format(text=text)}
             ],
-            temperature=0.1  # Lower temperature for more consistent results
+            temperature=0.2
         )
         
-        return response.choices[0].message.content
+        return response['choices'][0]['message']['content']
     except Exception as e:
         logger.error(f"Error processing with OpenAI: {str(e)}")
         raise
