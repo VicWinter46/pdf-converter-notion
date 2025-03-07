@@ -8,6 +8,9 @@ import sys
 from io import StringIO
 from datetime import datetime
 
+# Check for API key in environment
+if os.getenv("OPENAI_API_KEY"):
+    openai.api_key = os.getenv("OPENAI_API_KEY")
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
@@ -85,10 +88,12 @@ def extract_text_from_pdf(pdf_path):
         raise
 
 def process_with_openai(text, config):
-    """Process text with OpenAI API - compatible with older OpenAI library"""
+    """Process text with OpenAI API - compatible with newer OpenAI library"""
     try:
-        # Set the API key for the older OpenAI library version
-        openai.api_key = config["openai_api_key"]
+        # For OpenAI API version 1.0.0 and higher
+        from openai import OpenAI
+        
+        client = OpenAI(api_key=config["openai_api_key"])
         
         # Use an enhanced prompt to ensure we get cost data and product type
         enhanced_prompt = """
@@ -112,7 +117,7 @@ Return ONLY the CSV data without any explanations or markdown formatting.
 """
         
         # Use the enhanced prompt instead of the template from config
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model=config["model"],
             messages=[
                 {"role": "system", "content": "You are a specialized assistant that precisely extracts structured product data from purchase orders for Shopify import."},
@@ -121,7 +126,7 @@ Return ONLY the CSV data without any explanations or markdown formatting.
             temperature=0.1  # Lower temperature for more consistent results
         )
         
-        return response['choices'][0]['message']['content']
+        return response.choices[0].message.content
     except Exception as e:
         logger.error(f"Error processing with OpenAI: {str(e)}")
         raise
