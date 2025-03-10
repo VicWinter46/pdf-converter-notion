@@ -362,8 +362,11 @@ if __name__ == "__main__":
     
     # Run in a loop
     try:
-        import time
+    import time
+    print("Starting PDF-to-Shopify processor... Watching Google Drive.")
 
+except Exception as e:
+    print(f"Error during startup: {e}")
 print("Starting PDF-to-Shopify processor... Watching Google Drive.")
 
 while True:
