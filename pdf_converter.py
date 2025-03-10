@@ -15,6 +15,7 @@ import csv
 import time
 import base64
 import logging
+import sqlite3
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
@@ -33,6 +34,26 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Database setup
+DB_PATH = "file_metadata.db"
+
+def setup_database():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS files (
+            id INTEGER PRIMARY KEY,
+            client TEXT,
+            filename TEXT,
+            status TEXT,
+            uploaded_at TEXT,
+            processed_at TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+setup_database()
 
 def load_config():
     """
@@ -71,7 +92,7 @@ def load_config():
                 file_config = json.load(f)
             default_config.update(file_config)
         else:
-            with config_path.open("w", encoding="utf-8") as f:
+            with config_path.open("w", encoding="utf-8") as f):
                 json.dump(default_config, f, indent=4)
             logger.warning(f"Created default config file at {config_path}. Please edit it with your API key.")
     except Exception as e:
@@ -430,19 +451,3 @@ def parse_csv_data(csv_data):
                         data.append(row)
                     products_df = pd.DataFrame(data)
                     return products_df
-    except Exception as e:
-        logger.error(f"Error parsing CSV data: {e}")
-        logger.error("Raw CSV data for debugging: " + (csv_data[:500] + "..." if len(csv_data) > 500 else csv_data))
-        raise
-
-def post_process_data(products_df):
-    """
-    Apply additional cleaning and standardization to the DataFrame.
-
-    This includes standardizing sizes, deduplicating product-size combinations,
-    cleaning vendor names, fixing image URLs, and removing zero-quantity items.
-
-    Args:
-        products_df (pandas.DataFrame): Input DataFrame.
-    Returns:
-        pandas.DataFrame: Post-
