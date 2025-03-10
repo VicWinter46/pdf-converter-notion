@@ -6,9 +6,12 @@ import json
 import logging
 import sys
 import re
+import anthropic
+import base64
 from io import StringIO
 from datetime import datetime
 from PyPDF2 import PdfReader
+
 
 # Set up logging
 logging.basicConfig(
