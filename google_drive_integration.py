@@ -1,4 +1,3 @@
-import fix_anthropic
 import os
 import time
 import tempfile
