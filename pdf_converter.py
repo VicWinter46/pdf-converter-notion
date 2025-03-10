@@ -113,7 +113,22 @@ def extract_text_from_pdf(pdf_path):
         brand_matches = re.findall(brand_section_pattern, text, re.IGNORECASE)
         if brand_matches:
             potential_vendors.extend(brand_matches)
-        
+        # ENHANCEMENT: Add more patterns to detect vendors
+vendor_patterns = [
+    r'(?:From|Supplier|Bill\s+from|Sold\s+by|Purchased\s+from)[:\s]+([A-Za-z0-9\s&]+)',
+    r'(?:BILL\s+TO|SHIP\s+FROM)[:\s]+([A-Za-z0-9\s&]+)'
+]
+
+for pattern in vendor_patterns:
+    matches = re.findall(pattern, text, re.IGNORECASE)
+    if matches:
+        potential_vendors.extend([m.strip() for m in matches if len(m.strip()) > 2])
+
+# ENHANCEMENT: Check document letterhead (usually in first few lines)
+for i, line in enumerate(page_lines[:5]):
+    if line.strip() and not re.search(r'invoice|order|po\s+#|date', line.lower()):
+        if len(line.strip()) > 3 and not line.strip().isdigit():
+            potential_vendors.append(line.strip())
         # Add vendor detection markers to help the AI
         if potential_vendors:
             vendor_text = "\n### POTENTIAL VENDORS ###\n"
@@ -213,10 +228,15 @@ def process_with_openai(text, config):
         
         # Improved prompt with better vendor detection and exact sizing extraction
         enhanced_prompt = f"""
+enhanced_prompt = f"""
 Extract detailed product information from this purchase order for a Shopify import.
 
 ### CRITICAL EXTRACTION RULES:
-1. VENDOR/BRAND NAME: {vendor_guidance}
+1. VENDOR/BRAND NAME: 
+   - The vendor name is usually at the top of the document
+   - {vendor_guidance}
+   - Do NOT use "INVOICE" as the vendor name
+   - The vendor is the company MAKING the products, not the customer receiving them
 
 2. SIZE EXTRACTION:
    - ONLY extract sizes that have quantities greater than 0
@@ -224,12 +244,20 @@ Extract detailed product information from this purchase order for a Shopify impo
    - Create a separate row for EACH SIZE with a non-zero quantity
    - Skip any sizes that show quantity 0 or no quantity
    - Common sizes include: XXS, XS, S, M, L, XL, XXL
+   - IMPORTANT: Return JUST the size value WITHOUT "Size " prefix
+   - For example: "5" not "Size 5", "SM" not "Size SM"
+   - For baby sizes use space between number and M: "3 M" not "3M"
 
-3. SKU AND STYLE NUMBERS:
+3. TITLE FORMAT:
+   - DO NOT use dashes in titles, use spaces instead
+   - Use Title Case For All Words
+   - Include color in title when available (format: "in Color")
+
+4. SKU AND STYLE NUMBERS:
    - Use the exact style/item number as the SKU (e.g., "336537", "342348")
    - Look for numbers following "Style #", "Item #", or similar labels
 
-4. IMAGES: 
+5. IMAGES: 
    - Extract any image URLs if present in the document
    - If no URLs are available, leave the field empty
 
@@ -239,8 +267,8 @@ Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product im
 DOCUMENT TEXT:
 {text}
 
-Return ONLY properly formatted CSV data with header and data rows. No explanations or other text."""
-
+Return ONLY properly formatted CSV data with header and data rows. No explanations or other text.
+"""
         # Use OpenAI API with specialized prompt
         response = openai.ChatCompletion.create(
             model=config["model"],
@@ -500,7 +528,74 @@ def post_process_data(products_df):
             # Convert quantity to numeric first
             products_df["Quantity"] = pd.to_numeric(products_df["Quantity"], errors='coerce')
             products_df = products_df[products_df["Quantity"] > 0]
+        # ENHANCEMENT: Fix incorrect vendor names
+if "Vendor" in products_df.columns:
+    for idx, row in products_df.iterrows():
+        vendor = str(row["Vendor"]).strip()
+        
+        # Replace "INVOICE" with a better alternative
+        if vendor.upper() == "INVOICE":
+            # Try to find vendor name in SKU or title
+            sku = str(row["SKU"]).lower() if "SKU" in row and pd.notna(row["SKU"]) else ""
+            title = str(row["Title"]).lower() if "Title" in row and pd.notna(row["Title"]) else ""
             
+            # Look for known patterns in SKUs
+            if any(pattern in sku for pattern in ["roscoe", "blazer", "buddy"]):
+                products_df.at[idx, "Vendor"] = "Bailey Boys"
+            elif "bunny" in title or "bunny" in sku:
+                products_df.at[idx, "Vendor"] = "Bunnies By The Bay"
+            # Add other patterns as needed
+
+# ENHANCEMENT: Fix product titles - remove dashes, apply title case, etc.
+if "Title" in products_df.columns:
+    for idx, row in products_df.iterrows():
+        title = str(row["Title"])
+        
+        # Clean up the title (remove dashes, apply title case)
+        title = title.replace('-', ' ')
+        words = title.split()
+        if words:
+            # Keep the style name (first word typically)
+            style_name = words[0].capitalize()
+            
+            # Get product type and color
+            product_type = str(row["Type"]).strip() if "Type" in row and pd.notna(row["Type"]) else ""
+            color = str(row["Option2 value"]).strip() if "Option2 value" in row and pd.notna(row["Option2 value"]) else ""
+            
+            # Get vendor
+            vendor = str(row["Vendor"]).strip() if "Vendor" in row and pd.notna(row["Vendor"]) else ""
+            
+            # Format according to guidelines
+            if product_type and color:
+                if any(child_type in product_type.lower() for child_type in ["girls", "boys", "children"]):
+                    # Children's format includes vendor
+                    if vendor and vendor.lower() != "invoice":
+                        title = f"{vendor} {style_name} {product_type} in {color}"
+                    else:
+                        title = f"{style_name} {product_type} in {color}"
+                elif "baby" in product_type.lower():
+                    # Baby format includes vendor
+                    if vendor and vendor.lower() != "invoice":
+                        title = f"{vendor} {style_name} {product_type} in {color}"
+                    else:
+                        title = f"{style_name} {product_type} in {color}"
+                else:
+                    # Women's format doesn't include vendor
+                    title = f"{style_name} {product_type} in {color}"
+        
+        products_df.at[idx, "Title"] = title
+
+# ENHANCEMENT: Fix size formatting - remove "Size " prefix from values
+if "Option1 value" in products_df.columns:
+    for idx, row in products_df.iterrows():
+        size = str(row["Option1 value"]).strip()
+        
+        # Remove "Size " prefix if present
+        if size.startswith("Size "):
+            size = size.replace("Size ", "")
+        
+        # Store clean size value
+        products_df.at[idx, "Option1 value"] = size    
         return products_df
     except Exception as e:
         logger.error(f"Error in post-processing: {str(e)}")
