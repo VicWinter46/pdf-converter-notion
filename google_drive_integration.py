@@ -362,7 +362,7 @@ if __name__ == "__main__":
     
     # Run in a loop
     try:
-import time
+    import time
 
 print("Starting PDF-to-Shopify processor... Watching Google Drive.")
 
