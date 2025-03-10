@@ -424,7 +424,7 @@ def parse_csv_data(csv_data):
                 fixed_lines.append(",".join(fixed_line))
             else:
                 fixed_lines.append(line)
-        clean_csv = "\n.join(fixed_lines)
+        clean_csv = "\n".join(fixed_lines)
         logger.info("Cleaned CSV data (first 500 chars): " + (clean_csv[:500] + "..." if len(clean_csv) > 500 else clean_csv))
         try:
             products_df = pd.read_csv(StringIO(clean_csv))
