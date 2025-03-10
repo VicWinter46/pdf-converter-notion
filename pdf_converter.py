@@ -2,22 +2,9 @@
 """
 pdf_converter.py
 
-This script converts PDFs into Shopify-compatible CSVs using a combination of text extraction,
-advanced image/link detection, and the Anthropic Claude API for enhanced extraction.
-
-Dependencies:
-  - pdfplumber
-  - pandas
-  - PyPDF2
-  - anthropic
-  - watchdog (only needed if using the watch mode)
-  - Other standard libraries
-
-Usage:
-  Run from the command line with various options:
-    --pdf <path>       Convert a single PDF.
-    --dir <directory>  Convert all PDFs in a directory.
-    --watch            Watch the configured directory for new PDFs.
+This script converts PDFs into Shopify-compatible CSVs using advanced text extraction and the Anthropic Claude API.
+It extracts text (including vendor hints, image links, and quantity info), sends an enhanced prompt (with the PDF's Base64 string appended)
+to Claude, and then parses the CSV output into a final CSV file for Shopify.
 """
 
 import os
@@ -36,7 +23,7 @@ import pdfplumber
 import pandas as pd
 from PyPDF2 import PdfReader
 
-# Set up logging to file and stream
+# Set up logging to file and console
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -50,18 +37,13 @@ logger = logging.getLogger(__name__)
 
 def load_config():
     """
-    Load configuration from a JSON file or environment variables.
-    Creates a default config file if one doesn't exist.
+    Load configuration from config.json or environment variables.
+    Creates a default config file if missing.
 
     Returns:
-        dict: Configuration dictionary with keys including:
-            - anthropic_api_key
-            - model
-            - output_dir
-            - watch_dir
-            - prompt_template
+        dict: Configuration dictionary.
     Raises:
-        ValueError: If no Anthropic API key is provided.
+        ValueError: If anthropic_api_key is missing.
     """
     config_path = Path(__file__).parent / "config.json"
     default_config = {
@@ -79,7 +61,7 @@ def load_config():
         )
     }
 
-    # Prefer environment variable for Anthropic API key if available.
+    # Use environment variable if available.
     if os.getenv("ANTHROPIC_API_KEY"):
         default_config["anthropic_api_key"] = os.getenv("ANTHROPIC_API_KEY")
         logger.info("Using Anthropic API key from environment variable.")
@@ -88,10 +70,8 @@ def load_config():
         if config_path.is_file():
             with config_path.open("r", encoding="utf-8") as f:
                 file_config = json.load(f)
-            # Merge file config into defaults
             default_config.update(file_config)
         else:
-            # Write default config file if missing.
             with config_path.open("w", encoding="utf-8") as f:
                 json.dump(default_config, f, indent=4)
             logger.warning(f"Created default config file at {config_path}. Please edit it with your API key.")
@@ -103,7 +83,6 @@ def load_config():
         logger.error(msg)
         raise ValueError(msg)
 
-    # Ensure output and watch directories exist.
     os.makedirs(default_config["output_dir"], exist_ok=True)
     os.makedirs(default_config["watch_dir"], exist_ok=True)
 
@@ -112,17 +91,15 @@ def load_config():
 
 def extract_text_from_pdf(pdf_path):
     """
-    Extract text from a PDF file along with hyperlinks and image references.
+    Extract text from a PDF file, including image links and vendor hints.
 
-    Uses PyPDF2 first to extract text and look for annotations that may contain links.
-    Then uses pdfplumber to extract additional text and potential quantity information.
-    Vendor-related markers are added to the text for improved downstream extraction.
+    Uses PyPDF2 first to extract text and annotations.
+    Then enhances extraction with pdfplumber for additional clues (e.g., quantities).
 
     Args:
         pdf_path (str): Path to the PDF file.
-
     Returns:
-        str: The combined extracted text.
+        str: Combined extracted text.
     """
     try:
         reader = PdfReader(pdf_path)
@@ -130,33 +107,38 @@ def extract_text_from_pdf(pdf_path):
         image_links = []
         document_images = []
 
-        # Extract text and hyperlinks from each page.
         for page in reader.pages:
             page_text = page.extract_text() or ""
             text += page_text + "\n"
-            # Try to extract annotations for links (if available)
-            if hasattr(page, "get"):
-                annots = page.get("/Annots", [])
-                for annot in annots:
-                    try:
-                        obj = annot.get_object()
-                        if obj.get("/Subtype") == "/Link" and "/A" in obj:
-                            action = obj["/A"]
-                            if "/URI" in action:
-                                uri = action["/URI"]
-                                if uri.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
-                                    image_links.append(uri)
-                    except Exception as a_e:
-                        logger.debug(f"Annotation extraction error: {a_e}")
+            # Extract annotations safely:
+            annots = page.get("/Annots")
+            if annots:
+                try:
+                    if hasattr(annots, "get_object"):
+                        annots = annots.get_object()
+                    if isinstance(annots, list):
+                        for annot in annots:
+                            try:
+                                obj = annot.get_object() if hasattr(annot, "get_object") else annot
+                                if obj.get("/Subtype") == "/Link" and "/A" in obj and "/URI" in obj["/A"]:
+                                    uri = obj["/A"]["/URI"]
+                                    if uri.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
+                                        image_links.append(uri)
+                            except Exception as ae:
+                                logger.debug(f"Annotation error: {ae}")
+                    else:
+                        logger.debug("Annotations not a list")
+                except Exception as ex:
+                    logger.debug(f"Error processing annotations: {ex}")
 
-        # Detect potential vendor names from the top of the document.
+        # Look for potential vendor names in the first 20 lines.
         page_lines = text.split('\n')
         potential_vendors = []
         for line in page_lines[:20]:
             if re.match(r'^[A-Z][A-Z\s]+$', line.strip()) and len(line.strip()) > 3:
                 potential_vendors.append(line.strip())
 
-        # Look for brand/company information using regex patterns.
+        # Use regex to search for brand/company information.
         brand_section_pattern = r'(?:Brand|Company|Vendor)(?:\s+Information)?[:\s]+([A-Za-z0-9\s]+)'
         brand_matches = re.findall(brand_section_pattern, text, re.IGNORECASE)
         if brand_matches:
@@ -171,7 +153,6 @@ def extract_text_from_pdf(pdf_path):
             if matches:
                 potential_vendors.extend([m.strip() for m in matches if m.strip()])
 
-        # Check the first few lines for letterhead info.
         for line in page_lines[:5]:
             if line.strip() and not re.search(r'invoice|order|po\s+#|date', line.lower()):
                 if len(line.strip()) > 3 and not line.strip().isdigit():
@@ -183,7 +164,7 @@ def extract_text_from_pdf(pdf_path):
                 vendor_text += f"POTENTIAL VENDOR: {vendor}\n"
             text = vendor_text + text
 
-        # Try to extract image placeholders using pdfplumber.
+        # Use pdfplumber to extract image placeholders.
         try:
             with pdfplumber.open(pdf_path) as pdf:
                 for i, page in enumerate(pdf.pages):
@@ -203,7 +184,7 @@ def extract_text_from_pdf(pdf_path):
             for link in image_links:
                 text += f"IMAGE URL: {link}\n"
 
-        # Use pdfplumber for enhanced text extraction (e.g., quantity info).
+        # Use pdfplumber for extra extraction (e.g., quantities).
         with pdfplumber.open(pdf_path) as pdf:
             plumber_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
             size_qty_patterns = [
@@ -230,27 +211,24 @@ def extract_text_from_pdf(pdf_path):
 
     except Exception as e:
         logger.error(f"Error in PDF extraction: {e}")
-        # Fallback extraction using pdfplumber only.
         with pdfplumber.open(pdf_path) as pdf:
             return "\n".join(page.extract_text() or "" for page in pdf.pages)
 
 
 def encode_pdf_for_claude(pdf_path):
     """
-    Encode a PDF file to a Base64 string for sending to the Claude API.
+    Encode the PDF file into a Base64 string.
 
     Args:
-        pdf_path (str): Path to the PDF file.
-
+        pdf_path (str): Path to the PDF.
     Returns:
-        str: Base64-encoded string representation of the PDF.
+        str: Base64-encoded string.
     Raises:
-        Exception: If reading or encoding the PDF fails.
+        Exception: If encoding fails.
     """
     try:
         with open(pdf_path, "rb") as pdf_file:
-            encoded = base64.b64encode(pdf_file.read()).decode("utf-8")
-        return encoded
+            return base64.b64encode(pdf_file.read()).decode("utf-8")
     except Exception as e:
         logger.error(f"Error encoding PDF: {e}")
         raise
@@ -258,19 +236,18 @@ def encode_pdf_for_claude(pdf_path):
 
 def process_with_claude(pdf_path, config):
     """
-    Process the PDF using the Anthropic Claude API to extract detailed product information.
+    Process the PDF using the Anthropic Claude API to extract detailed CSV data.
 
-    Constructs an enhanced prompt (with vendor guidance) and sends both text and the PDF (as a Base64 image)
-    to the Claude API. If the initial attempt yields unsatisfactory CSV data, it falls back to a backup prompt.
+    Builds an enhanced prompt with vendor guidance and appends the Base64-encoded PDF.
+    Uses the new completion.create() method.
 
     Args:
-        pdf_path (str): Path to the PDF file.
+        pdf_path (str): Path to the PDF.
         config (dict): Configuration dictionary.
-
     Returns:
-        str: CSV-formatted string returned by Claude.
+        str: CSV-formatted text from Claude.
     Raises:
-        Exception: If the API call or processing fails.
+        Exception: If the API call fails.
     """
     try:
         api_key = os.getenv("ANTHROPIC_API_KEY") or config["anthropic_api_key"]
@@ -298,15 +275,11 @@ def process_with_claude(pdf_path, config):
 
         pdf_base64 = encode_pdf_for_claude(pdf_path)
 
-        # Set up the Anthropic Claude client.
+        # Set up the Anthropic client using the current API.
         import anthropic
-        try:
-            client = anthropic.Anthropic.__new__(anthropic.Anthropic)
-            client.api_key = api_key
-        except Exception as e:
-            # Fallback for older versions of the client.
-            client = anthropic.Client(api_key=api_key)
+        client = anthropic.Client(api_key=api_key)
 
+        # Build the enhanced prompt.
         enhanced_prompt = (
             "Extract detailed product information from this purchase order for a Shopify import.\n\n"
             "### CRITICAL EXTRACTION RULES:\n"
@@ -334,42 +307,29 @@ def process_with_claude(pdf_path, config):
             "   - If no URLs are available, leave the field empty\n\n"
             "### TABLE FORMAT:\n"
             "Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product image URL,Quantity\n\n"
-            "Return ONLY properly formatted CSV data with header and data rows. No explanations or other text."
+            "Return ONLY properly formatted CSV data with header and data rows. No explanations or other text.\n\n"
+            "Attached PDF (Base64):\n" + pdf_base64
         )
 
-        # Call the Claude API with the enhanced prompt and PDF image.
-        message = client.messages.create(
+        # Call the Anthropic API using completion.create.
+        response = client.completion.create(
+            prompt=enhanced_prompt,
             model=config["model"],
-            max_tokens=4000,
+            max_tokens_to_sample=4000,
             temperature=0.1,
-            system="You are a specialized purchase order extraction system that accurately identifies vendors, products, sizes with quantities, and pricing.",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": enhanced_prompt},
-                        {"type": "image",
-                         "source": {
-                             "type": "base64",
-                             "media_type": "application/pdf",
-                             "data": pdf_base64
-                         }}
-                    ]
-                }
-            ]
+            stop_sequences=["\n\nHuman:"]
         )
+        result = response.completion
 
-        result = message.content[0].text
-
-        # Clean result if wrapped in code block markers.
+        # Clean result if wrapped in code markers.
         if result.startswith("```csv") or result.startswith("```"):
             result = re.sub(r'^```csv\s*', '', result)
             result = re.sub(r'^```\s*', '', result)
             result = re.sub(r'\s*```$', '', result)
 
-        # If expected CSV headers are missing, try a backup prompt.
+        # If headers are missing, try a backup prompt.
         if "Product Title" not in result and "Title" not in result:
-            logger.warning("First extraction attempt yielded poor results, trying with alternate prompt")
+            logger.warning("First extraction attempt yielded poor results, trying backup prompt.")
             backup_prompt = (
                 "Extract all products from this purchase order into a CSV table.\n\n"
                 "For each product in the PDF:\n"
@@ -378,28 +338,17 @@ def process_with_claude(pdf_path, config):
                 "3. Include colors if available\n"
                 "4. Create a separate row for each size variation\n\n"
                 "Return ONLY the CSV with this header (no explanations):\n"
-                "Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product image URL,Quantity"
+                "Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product image URL,Quantity\n\n"
+                "Attached PDF (Base64):\n" + pdf_base64
             )
-            message = client.messages.create(
+            response = client.completion.create(
+                prompt=backup_prompt,
                 model=config["model"],
-                max_tokens=4000,
+                max_tokens_to_sample=4000,
                 temperature=0.1,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": backup_prompt},
-                            {"type": "image",
-                             "source": {
-                                 "type": "base64",
-                                 "media_type": "application/pdf",
-                                 "data": pdf_base64
-                             }}
-                        ]
-                    }
-                ]
+                stop_sequences=["\n\nHuman:"]
             )
-            result = message.content[0].text
+            result = response.completion
             if result.startswith("```csv") or result.startswith("```"):
                 result = re.sub(r'^```csv\s*', '', result)
                 result = re.sub(r'^```\s*', '', result)
@@ -415,15 +364,12 @@ def process_with_claude(pdf_path, config):
 
 def parse_csv_data(csv_data):
     """
-    Parse CSV data into a pandas DataFrame with enhanced error handling.
-    
-    Attempts several strategies if the CSV formatting is irregular.
+    Parse CSV text into a pandas DataFrame with multiple fallback methods.
 
     Args:
         csv_data (str): CSV-formatted text.
-
     Returns:
-        pandas.DataFrame: DataFrame containing parsed product data.
+        pandas.DataFrame: Parsed DataFrame.
     Raises:
         Exception: If all parsing attempts fail.
     """
@@ -462,7 +408,7 @@ def parse_csv_data(csv_data):
             return products_df
         except Exception as first_error:
             try:
-                logger.info("Standard CSV parsing failed, trying with quoting options...")
+                logger.info("Standard CSV parsing failed, trying quoting options...")
                 products_df = pd.read_csv(StringIO(clean_csv), quoting=1)
                 return products_df
             except Exception:
@@ -491,19 +437,17 @@ def parse_csv_data(csv_data):
 
 def post_process_data(products_df):
     """
-    Apply additional post-processing to fix common issues in the DataFrame.
+    Apply additional cleaning and standardization to the DataFrame.
 
     This includes standardizing sizes, deduplicating product-size combinations,
-    cleaning vendor names, handling image URLs, and removing zero-quantity products.
+    cleaning vendor names, fixing image URLs, and removing zero-quantity items.
 
     Args:
-        products_df (pandas.DataFrame): The DataFrame to post-process.
-
+        products_df (pandas.DataFrame): Input DataFrame.
     Returns:
-        pandas.DataFrame: The post-processed DataFrame.
+        pandas.DataFrame: Post-processed DataFrame.
     """
     try:
-        # Standardize sizes if present.
         if "Size" in products_df.columns:
             size_mapping = {
                 "XSMALL": "XS",
@@ -519,7 +463,6 @@ def post_process_data(products_df):
                 if size in size_mapping:
                     products_df.at[idx, "Size"] = size_mapping[size]
 
-        # Remove duplicate product-size combinations.
         if all(col in products_df.columns for col in ["Product Title", "Size", "SKU"]):
             products_df["_temp_key"] = products_df["SKU"].astype(str) + ":" + products_df["Size"].astype(str)
             if products_df["_temp_key"].duplicated().any():
@@ -527,7 +470,6 @@ def post_process_data(products_df):
                 products_df = products_df.drop_duplicates(subset="_temp_key")
             products_df = products_df.drop(columns=["_temp_key"])
 
-        # Fix vendor names.
         if "Vendor" in products_df.columns:
             for idx, row in products_df.iterrows():
                 vendor = str(row["Vendor"]).strip()
@@ -546,7 +488,6 @@ def post_process_data(products_df):
                     if parts and parts[0].strip():
                         products_df.at[idx, "Vendor"] = parts[0].strip()
 
-        # Fix size formatting in "Option1 value" if present.
         if "Option1 value" in products_df.columns:
             for idx, row in products_df.iterrows():
                 size = str(row["Option1 value"]).strip()
@@ -554,7 +495,6 @@ def post_process_data(products_df):
                     size = size.replace("Size ", "")
                 products_df.at[idx, "Option1 value"] = size
 
-        # Handle product image URLs.
         if "Product image URL" in products_df.columns:
             valid_urls = {}
             for idx, row in products_df.iterrows():
@@ -567,7 +507,6 @@ def post_process_data(products_df):
                 if sku and sku in valid_urls:
                     products_df.at[idx, "Product image URL"] = valid_urls[sku]
 
-        # Remove products with 0 quantity.
         if "Quantity" in products_df.columns:
             logger.info("Removing products with 0 quantity")
             products_df["Quantity"] = pd.to_numeric(products_df["Quantity"], errors='coerce')
@@ -582,14 +521,12 @@ def post_process_data(products_df):
 
 def format_for_shopify(products_df):
     """
-    Format the DataFrame for Shopify import by mapping columns,
-    setting default values, and ensuring consistent formatting.
+    Map and format the DataFrame for Shopify import.
 
     Args:
-        products_df (pandas.DataFrame): DataFrame containing product data.
-
+        products_df (pandas.DataFrame): Input DataFrame.
     Returns:
-        pandas.DataFrame: Formatted DataFrame ready for CSV export.
+        pandas.DataFrame: Formatted DataFrame.
     """
     try:
         products_df = post_process_data(products_df)
@@ -676,18 +613,16 @@ def format_for_shopify(products_df):
 
 def pdf_to_shopify_csv(pdf_path, output_path=None, config=None):
     """
-    Convert a PDF file to a Shopify-compatible CSV by processing with Claude,
-    parsing the returned CSV data, formatting it, and saving to disk.
+    Convert a PDF to a Shopify-compatible CSV using the Claude API.
 
     Args:
-        pdf_path (str): Path to the PDF file.
-        output_path (str, optional): Output CSV file path.
+        pdf_path (str): Path to the PDF.
+        output_path (str, optional): Where to save the CSV.
         config (dict, optional): Configuration dictionary.
-
     Returns:
-        str: The path to the saved CSV file.
+        str: Path to the saved CSV file.
     Raises:
-        Exception: If any step of the conversion fails.
+        Exception: If conversion fails.
     """
     if config is None:
         config = load_config()
@@ -712,14 +647,13 @@ def pdf_to_shopify_csv(pdf_path, output_path=None, config=None):
 
 def process_directory(directory=None, config=None):
     """
-    Process all PDF files in a specified directory and move processed files to a subdirectory.
+    Process all PDFs in a directory and move processed files to a subfolder.
 
     Args:
-        directory (str, optional): Directory to search for PDFs. Defaults to config["watch_dir"].
+        directory (str, optional): Directory to search for PDFs.
         config (dict, optional): Configuration dictionary.
-
     Returns:
-        list: A list of dictionaries with details of each processed PDF.
+        list: Details of processed PDFs.
     """
     if config is None:
         config = load_config()
