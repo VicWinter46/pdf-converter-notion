@@ -458,3 +458,39 @@ def parse_csv_data(csv_data):
                         raise ValueError("Failed to parse CSV data with all methods")
     except Exception as e:
         logger.error(f"Error parsing CSV data: {e}")
+
+
+import openai
+
+def process_with_openai(text):
+    """
+    Process extracted text with OpenAI to generate structured Shopify CSV output.
+    """
+    openai.api_key = os.getenv("OPENAI_API_KEY")
+
+    prompt = f"""
+    Extract product details in CSV format:
+    Product Title, Vendor, Product Type, SKU, Wholesale Price, MSRP, Size, Color
+
+    - Product Type must be accurately determined from the text.
+    - If MSRP is missing, use Wholesale Price * 2.
+    - Only include Color if multiple colors exist.
+    - Ensure every product has a SKU.
+    - Return only the CSV data.
+
+    Purchase Order Text:
+    {text}
+    """
+
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "system", "content": "You are an AI that structures product data into a Shopify CSV."},
+                      {"role": "user", "content": prompt}],
+            temperature=0.2
+        )
+        return response["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"Error processing with OpenAI: {e}")
+        return None
+
