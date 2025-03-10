@@ -114,6 +114,7 @@ def extract_text_from_pdf(pdf_path):
             annots = page.get("/Annots")
             if annots:
                 try:
+                    # Resolve indirect objects if needed.
                     if hasattr(annots, "get_object"):
                         annots = annots.get_object()
                     if isinstance(annots, list):
@@ -239,7 +240,8 @@ def process_with_claude(pdf_path, config):
     Process the PDF using the Anthropic Claude API to extract detailed CSV data.
 
     Builds an enhanced prompt with vendor guidance and appends the Base64-encoded PDF.
-    Uses the new completion.create() method.
+    Uses the new completion.create() method. A monkey-patch is applied to remove any 'proxies'
+    keyword argument if present.
 
     Args:
         pdf_path (str): Path to the PDF.
@@ -275,11 +277,18 @@ def process_with_claude(pdf_path, config):
 
         pdf_base64 = encode_pdf_for_claude(pdf_path)
 
-        # Set up the Anthropic client using the current API.
+        # Import and monkey-patch the Anthropic client to ignore any 'proxies' keyword argument.
         import anthropic
+        original_init = anthropic.Client.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs.pop("proxies", None)
+            return original_init(self, *args, **kwargs)
+
+        anthropic.Client.__init__ = patched_init
+
         client = anthropic.Client(api_key=api_key)
 
-        # Build the enhanced prompt.
         enhanced_prompt = (
             "Extract detailed product information from this purchase order for a Shopify import.\n\n"
             "### CRITICAL EXTRACTION RULES:\n"
@@ -311,7 +320,6 @@ def process_with_claude(pdf_path, config):
             "Attached PDF (Base64):\n" + pdf_base64
         )
 
-        # Call the Anthropic API using completion.create.
         response = client.completion.create(
             prompt=enhanced_prompt,
             model=config["model"],
@@ -321,13 +329,11 @@ def process_with_claude(pdf_path, config):
         )
         result = response.completion
 
-        # Clean result if wrapped in code markers.
         if result.startswith("```csv") or result.startswith("```"):
             result = re.sub(r'^```csv\s*', '', result)
             result = re.sub(r'^```\s*', '', result)
             result = re.sub(r'\s*```$', '', result)
 
-        # If headers are missing, try a backup prompt.
         if "Product Title" not in result and "Title" not in result:
             logger.warning("First extraction attempt yielded poor results, trying backup prompt.")
             backup_prompt = (
