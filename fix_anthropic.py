@@ -1,47 +1,40 @@
-import sys
+# fix_anthropic.py - Place this in the same directory as your main script
+import os
+import importlib
 import logging
 
-# Set up basic logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Monkey patch the anthropic module
-def patch_anthropic():
+def get_claude_client(api_key=None):
+    """Get a properly initialized Claude client that works with your environment"""
+    if api_key is None:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("No API key provided and ANTHROPIC_API_KEY environment variable not set")
+    
+    # Import anthropic library
+    import anthropic
+    
     try:
-        import anthropic
-        
-        # Store original __init__ methods
-        if hasattr(anthropic, 'Anthropic'):
-            original_init = anthropic.Anthropic.__init__
+        # Try the newer API approach
+        client = anthropic.Anthropic(api_key=api_key)
+        return client
+    except TypeError as e:
+        if "unexpected keyword argument 'proxies'" in str(e):
+            # This is the error we're seeing - create client without proxies
+            # We need to get access to the parent class to initialize without proxies
+            from anthropic.client import Anthropic as AnthropicBase
             
-            # Create a patched init that strips out proxies
-            def patched_init(self, *args, **kwargs):
-                if 'proxies' in kwargs:
-                    logger.info(f"Removing proxies from Anthropic init: {kwargs['proxies']}")
-                    del kwargs['proxies']
-                return original_init(self, *args, **kwargs)
+            # Create a custom Anthropic class without proxies param
+            class CustomAnthropic(AnthropicBase):
+                def __init__(self, **kwargs):
+                    # Remove proxies if present
+                    if 'proxies' in kwargs:
+                        del kwargs['proxies']
+                    super().__init__(**kwargs)
             
-            # Apply our patch
-            anthropic.Anthropic.__init__ = patched_init
-            logger.info("Successfully patched Anthropic class")
-            
-        if hasattr(anthropic, 'Client'):
-            original_client_init = anthropic.Client.__init__
-            
-            def patched_client_init(self, *args, **kwargs):
-                if 'proxies' in kwargs:
-                    logger.info(f"Removing proxies from Client init: {kwargs['proxies']}")
-                    del kwargs['proxies']
-                return original_client_init(self, *args, **kwargs)
-                
-            anthropic.Client.__init__ = patched_client_init
-            logger.info("Successfully patched Client class")
-            
-        logger.info("Anthropic module successfully patched")
-        return True
-    except Exception as e:
-        logger.error(f"Error patching anthropic: {str(e)}")
-        return False
-
-# Patch anthropic when this module is imported
-success = patch_anthropic()
+            # Return our custom client
+            return CustomAnthropic(api_key=api_key)
+        else:
+            # Different error, re-raise
+            raise
