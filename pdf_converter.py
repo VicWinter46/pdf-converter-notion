@@ -596,15 +596,16 @@ def save_to_csv(df, filename, output_dir):
         logger.error(f"Error saving CSV file: {e}")
         raise
 
-def update_database(client, filename, status, processed_at=None):
+def process_pdf(pdf_path, client="default", config=None):
     """
-    Update the status of a file in the database.
+    Process a single PDF file and convert it to a simplified Shopify-compatible CSV.
 
     Args:
-        client (str): Client identifier.
-        filename (str): Filename.
-        status (str): Processing status (e.g., 'success', 'error').
-        processed_at (str, optional): Processing timestamp.
+        pdf_path (str): Path to the PDF file.
+        client (str, optional): Client identifier. Defaults to "default".
+        config (dict, optional): Configuration dictionary. If None, will be loaded.
+    Returns:
+        str: Path to the output CSV file, or None if processing failed.
     """
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -646,16 +647,15 @@ def update_database(client, filename, status, processed_at=None):
     except Exception as e:
         logger.error(f"Error updating database: {e}")
 
-def process_pdf(pdf_path, client="default", config=None):
+def update_database(client, filename, status, processed_at=None):
     """
-    Process a single PDF file and convert it to a simplified Shopify-compatible CSV.
+    Update the status of a file in the database.
 
     Args:
-        pdf_path (str): Path to the PDF file.
-        client (str, optional): Client identifier. Defaults to "default".
-        config (dict, optional): Configuration dictionary. If None, will be loaded.
-    Returns:
-        str: Path to the output CSV file, or None if processing failed.
+        client (str): Client identifier.
+        filename (str): Filename.
+        status (str): Processing status (e.g., 'success', 'error').
+        processed_at (str, optional): Processing timestamp.
     """
     if not config:
         config = load_config()
@@ -692,13 +692,8 @@ def process_pdf(pdf_path, client="default", config=None):
         update_database(client, filename, f"error: {str(e)}")
         return None
 
-def process_watch_directory(config=None):
-    """
-    Monitor the watch directory for new PDF files and process them.
-
-    Args:
-        config (dict, optional): Configuration dictionary. If None, will be loaded.
-    """
+if __name__ == "__main__":
+    sys.exit(main())
     if not config:
         config = load_config()
     
@@ -739,9 +734,12 @@ def process_watch_directory(config=None):
     except Exception as e:
         logger.error(f"Error monitoring watch directory: {e}")
 
-def main():
+def process_watch_directory(config=None):
     """
-    Main function that processes command line arguments or runs in watch mode.
+    Monitor the watch directory for new PDF files and process them.
+
+    Args:
+        config (dict, optional): Configuration dictionary. If None, will be loaded.
     """
     try:
         config = load_config()
@@ -769,5 +767,19 @@ def main():
     
     return 0
 
-if __name__ == "__main__":
-    sys.exit(main())
+def main():
+    """
+    Main function that processes command line arguments or runs in watch mode.
+    """
+    config = load_config()
+    
+    if output_dir:
+        original_output_dir = config["output_dir"]
+        config["output_dir"] = output_dir
+        os.makedirs(output_dir, exist_ok=True)
+    
+    try:
+        return process_pdf(pdf_path, client, config)
+    finally:
+        if output_dir:
+            config["output_dir"] = original_output_dir
