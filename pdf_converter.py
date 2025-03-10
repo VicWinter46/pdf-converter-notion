@@ -646,7 +646,7 @@ def update_database(client, filename, status, processed_at=None):
     except Exception as e:
         logger.error(f"Error updating database: {e}")
 
-def pdf_to_shopify_csv(pdf_path, output_dir=None, client="default"):
+def pdf_to_shopify_csv(pdf_path, output_dir=None, client="default", config=None):
     """
     Convert a PDF file to Shopify-compatible CSV.
     This function serves as the main entry point for external scripts.
@@ -655,11 +655,13 @@ def pdf_to_shopify_csv(pdf_path, output_dir=None, client="default"):
         pdf_path (str): Path to the PDF file.
         output_dir (str, optional): Output directory. If None, uses the configured output dir.
         client (str, optional): Client identifier. Defaults to "default".
+        config (dict, optional): Configuration dictionary. If None, will be loaded.
     
     Returns:
         str: Path to the output CSV file, or None if processing failed.
     """
-    config = load_config()
+    if not config:
+        config = load_config()
     
     if output_dir:
         original_output_dir = config["output_dir"]
