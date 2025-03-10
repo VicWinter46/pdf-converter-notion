@@ -236,7 +236,43 @@ def process_with_openai(text, config):
 - All products in a PO typically come from the same vendor, but verify this"""
         
         # Improved prompt with better vendor detection and exact sizing extraction
-enhanced_prompt = f"""
+def process_with_claude(pdf_path, config):
+    """Process PDF with Claude API for better extraction"""
+    try:
+        # Set API key from environment or config
+        api_key = os.getenv("ANTHROPIC_API_KEY") or config["anthropic_api_key"]
+        
+        # Extract text for vendor detection
+        extracted_text = extract_text_from_pdf(pdf_path)
+        
+        # Look for potential vendor information
+        vendor_info = []
+        for line in extracted_text.split('\n'):
+            if line.startswith("POTENTIAL VENDOR:"):
+                vendor = line.replace("POTENTIAL VENDOR:", "").strip()
+                vendor_info.append(vendor)
+        
+        vendor_guidance = ""
+        if vendor_info:
+            vendor_guidance = f"""
+- The document mentions these potential vendors: {', '.join(vendor_info)}
+- Identify the CORRECT vendor for each product
+- Look at document headers, logos, and branding to determine the true vendor name
+- Different products may come from different vendors"""
+        else:
+            vendor_guidance = """
+- Look for the vendor/brand name at the top of the document or in headers
+- The vendor is typically the company SELLING the products, not the customer
+- All products in a PO typically come from the same vendor, but verify this"""
+        
+        # Encode PDF for Claude
+        pdf_base64 = encode_pdf_for_claude(pdf_path)
+        
+        # Claude client setup
+        client = anthropic.Anthropic(api_key=api_key)
+        
+        # Enhanced prompt for Claude with better extraction guidance
+        enhanced_prompt = f"""
 Extract detailed product information from this purchase order for a Shopify import.
 
 ### CRITICAL EXTRACTION RULES:
@@ -274,49 +310,105 @@ Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product im
 
 Return ONLY properly formatted CSV data with header and data rows. No explanations or other text.
 """
-        # Use OpenAI API with specialized prompt
-        response = openai.ChatCompletion.create(
+
+        # Use Claude API with specialized prompt and PDF
+        message = client.messages.create(
             model=config["model"],
+            max_tokens=4000,
+            temperature=0.1,  # Lower temperature for more consistent results
+            system="You are a specialized purchase order extraction system that accurately identifies vendors, products, sizes with quantities, and pricing.",
             messages=[
-                {"role": "system", "content": "You are a specialized purchase order extraction system that accurately identifies vendors, products, sizes with quantities, and pricing."},
-                {"role": "user", "content": enhanced_prompt}
-            ],
-            temperature=0.1  # Lower temperature for more consistent results
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text", 
+                            "text": enhanced_prompt
+                        },
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": pdf_base64
+                            }
+                        }
+                    ]
+                }
+            ]
         )
         
-        # Get result and verify it contains data
-        result = response['choices'][0]['message']['content']
-        if "Product Title" not in result or "," not in result or len(result.split('\n')) < 2:
-            # Try one more time with different prompt if extraction failed
-            logger.warning("First extraction attempt failed, trying again with alternate prompt")
+        # Extract the CSV result from Claude's response
+        result = message.content[0].text
+        
+        # Clean the result to ensure it's valid CSV
+        if result.startswith("```csv") or result.startswith("```"):
+            result = re.sub(r'^```csv\s*', '', result)
+            result = re.sub(r'^```\s*', '', result)
+            result = re.sub(r'\s*```$', '', result)
+        
+        # If no header is found, try a slightly different prompt
+        if "Product Title" not in result and "Title" not in result:
+            logger.warning("First extraction attempt yielded poor results, trying with alternate prompt")
             
-            backup_prompt = f"""
-Extract product information from this purchase order with EXACT quantities for each size.
+            # Simpler backup prompt
+            backup_prompt = """
+Extract all products from this purchase order into a CSV table.
 
-IMPORTANT:
-1. For each product, identify:
-   - Full product name and description
-   - Brand/vendor name (the company selling the items, not the customer)
-   - Product type (Dress, Blouse, etc.)
-   - SKU/Style number 
-   - Prices (wholesale and retail)
-   - ONLY sizes with quantities greater than 0
-   - Colors
+For each product in the PDF:
+1. Get the Product Title, Vendor, Product Type, SKU, Price information
+2. Extract all sizes with quantities > 0
+3. Include colors if available
+4. Create a separate row for each size variation
 
-2. Format each size as a separate row in the CSV
-   - If a product comes in sizes XS, S, M and quantities are XS:1, S:2, M:0
-   - Only include rows for XS and S (not M since quantity is 0)
-
-3. Carefully identify the correct vendor name from the document header or branding
-
-Look for sections that show quantities for each size and carefully extract only sizes with quantities > 0.
-
-Here's the purchase order to analyze:
-{text}
-
-Return ONLY the CSV with this header (include Quantity column):
+Return ONLY the CSV with this header (no explanations):
 Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product image URL,Quantity
 """
+            
+            # Try again with simpler prompt
+            message = client.messages.create(
+                model=config["model"],
+                max_tokens=4000,
+                temperature=0.1,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text", 
+                                "text": backup_prompt
+                            },
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/pdf",
+                                    "data": pdf_base64
+                                }
+                            }
+                        ]
+                    }
+                ]
+            )
+            
+            # Get the second attempt result
+            result = message.content[0].text
+            
+            # Clean the result again
+            if result.startswith("```csv") or result.startswith("```"):
+                result = re.sub(r'^```csv\s*', '', result)
+                result = re.sub(r'^```\s*', '', result)
+                result = re.sub(r'\s*```$', '', result)
+        
+        # Log result for debugging
+        logger.info("Claude extraction result:")
+        logger.info(result[:500] + "..." if len(result) > 500 else result)
+        
+        return result
+    
+    except Exception as e:
+        logger.error(f"Error processing with Claude: {str(e)}")
+        raise
             
             response = openai.ChatCompletion.create(
                 model=config["model"],
