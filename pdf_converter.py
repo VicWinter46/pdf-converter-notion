@@ -113,22 +113,24 @@ def extract_text_from_pdf(pdf_path):
         brand_matches = re.findall(brand_section_pattern, text, re.IGNORECASE)
         if brand_matches:
             potential_vendors.extend(brand_matches)
+        
         # ENHANCEMENT: Add more patterns to detect vendors
-vendor_patterns = [
-    r'(?:From|Supplier|Bill\s+from|Sold\s+by|Purchased\s+from)[:\s]+([A-Za-z0-9\s&]+)',
-    r'(?:BILL\s+TO|SHIP\s+FROM)[:\s]+([A-Za-z0-9\s&]+)'
-]
+        vendor_patterns = [
+            r'(?:From|Supplier|Bill\s+from|Sold\s+by|Purchased\s+from)[:\s]+([A-Za-z0-9\s&]+)',
+            r'(?:BILL\s+TO|SHIP\s+FROM)[:\s]+([A-Za-z0-9\s&]+)'
+        ]
 
-for pattern in vendor_patterns:
-    matches = re.findall(pattern, text, re.IGNORECASE)
-    if matches:
-        potential_vendors.extend([m.strip() for m in matches if len(m.strip()) > 2])
+        for pattern in vendor_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            if matches:
+                potential_vendors.extend([m.strip() for m in matches if len(m.strip()) > 2])
 
-# ENHANCEMENT: Check document letterhead (usually in first few lines)
-for i, line in enumerate(page_lines[:5]):
-    if line.strip() and not re.search(r'invoice|order|po\s+#|date', line.lower()):
-        if len(line.strip()) > 3 and not line.strip().isdigit():
-            potential_vendors.append(line.strip())
+        # ENHANCEMENT: Check document letterhead (usually in first few lines)
+        for i, line in enumerate(page_lines[:5]):
+            if line.strip() and not re.search(r'invoice|order|po\s+#|date', line.lower()):
+                if len(line.strip()) > 3 and not line.strip().isdigit():
+                    potential_vendors.append(line.strip())
+        
         # Add vendor detection markers to help the AI
         if potential_vendors:
             vendor_text = "\n### POTENTIAL VENDORS ###\n"
@@ -147,13 +149,13 @@ for i, line in enumerate(page_lines[:5]):
         except Exception as img_err:
             logger.warning(f"Image extraction error: {str(img_err)}")
         
-        # Add image presence markers to help OpenAI understand there are images
+        # Add image presence markers to help Claude understand there are images
         if document_images:
             text += "\n\n### DOCUMENT CONTAINS IMAGES ###\n"
             for img_ref in document_images:
                 text += f"IMAGE REFERENCE: {img_ref}\n"
         
-        # Add image links to the text so OpenAI can find them
+        # Add image links to the text so Claude can find them
         if image_links:
             text += "\n\n### IMAGE LINKS ###\n"
             for link in image_links:
@@ -188,6 +190,13 @@ for i, line in enumerate(page_lines[:5]):
             if has_quantities:
                 text += quantity_text
         
+        return text
+        
+    except Exception as e:
+        logger.error(f"Error in PDF extraction: {str(e)}")
+        # Fall back to regular text extraction
+        with pdfplumber.open(pdf_path) as pdf:
+            text = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
         return text
         
     except Exception as e:
@@ -592,6 +601,35 @@ if "Option1 value" in products_df.columns:
         
         # Store clean size value
         products_df.at[idx, "Option1 value"] = size    
+        # ENHANCEMENT: Fix incorrect vendor names
+    if "Vendor" in products_df.columns:
+        for idx, row in products_df.iterrows():
+            vendor = str(row["Vendor"]).strip()
+            
+            # Replace "INVOICE" with a better alternative
+            if vendor.upper() == "INVOICE":
+                # Try to find vendor name in SKU or title
+                sku = str(row["SKU"]).lower() if "SKU" in row and pd.notna(row["SKU"]) else ""
+                title = str(row["Title"]).lower() if "Title" in row and pd.notna(row["Title"]) else ""
+                
+                # Look for known patterns in SKUs
+                if any(pattern in sku for pattern in ["roscoe", "blazer", "buddy"]):
+                    products_df.at[idx, "Vendor"] = "Bailey Boys"
+                elif "bunny" in title or "bunny" in sku:
+                    products_df.at[idx, "Vendor"] = "Bunnies By The Bay"
+                # Add other patterns as needed
+
+    # ENHANCEMENT: Fix size formatting - remove "Size " prefix from values
+    if "Option1 value" in products_df.columns:
+        for idx, row in products_df.iterrows():
+            size = str(row["Option1 value"]).strip()
+            
+            # Remove "Size " prefix if present
+            if size.startswith("Size "):
+                size = size.replace("Size ", "")
+            
+            # Store clean size value
+            products_df.at[idx, "Option1 value"] = size
         return products_df
     except Exception as e:
         logger.error(f"Error in post-processing: {str(e)}")
