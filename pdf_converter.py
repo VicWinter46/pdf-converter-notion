@@ -1,5 +1,4 @@
 import pdfplumber
-import openai
 import pandas as pd
 import os
 import json
@@ -31,17 +30,17 @@ def load_config():
     
     # Start with default config
     default_config = {
-        "openai_api_key": "",
-        "model": "gpt-3.5-turbo",
+        "anthropic_api_key": "",
+        "model": "claude-3-sonnet-20240229",
         "output_dir": "output",
         "watch_dir": "watch",
-        "prompt_template": "Extract product details in CSV format:\nProduct Title,Body (HTML),Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color\n\nIf MSRP is missing, use Wholesale Price.\nSizes should be standardized (XS, S, M, L, XL, 0-3 M, 2T, etc.).\nOnly include Color if multiple colors exist.\n\nText:\n{text}\n\nReturn only CSV data."
+        "prompt_template": "Extract product details in CSV format:\nProduct Title,Body (HTML),Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color\n\nIf MSRP is missing, use Wholesale Price.\nSizes should be standardized (XS, S, M, L, XL, 0-3 M, 2T, etc.).\nOnly include Color if multiple colors exist.\n\nReturn only CSV data."
     }
     
     # Check for environment variables first
-    if os.getenv("OPENAI_API_KEY"):
-        default_config["openai_api_key"] = os.getenv("OPENAI_API_KEY")
-        logger.info("Using OpenAI API key from environment variable")
+    if os.getenv("ANTHROPIC_API_KEY"):
+        default_config["anthropic_api_key"] = os.getenv("ANTHROPIC_API_KEY")
+        logger.info("Using Anthropic API key from environment variable")
     
     # Try to load from config file
     try:
@@ -63,9 +62,9 @@ def load_config():
         logger.error(f"Error loading config file: {str(e)}")
     
     # Final check for required fields
-    if not default_config.get("openai_api_key"):
-        logger.error(f"Missing openai_api_key in config file. Please add it to {config_path}")
-        raise ValueError("Missing openai_api_key in config file")
+    if not default_config.get("anthropic_api_key"):
+        logger.error(f"Missing anthropic_api_key in config file. Please add it to {config_path}")
+        raise ValueError("Missing anthropic_api_key in config file")
     
     # Create directories if they don't exist
     os.makedirs(default_config["output_dir"], exist_ok=True)
@@ -130,7 +129,7 @@ def extract_text_from_pdf(pdf_path):
             if line.strip() and not re.search(r'invoice|order|po\s+#|date', line.lower()):
                 if len(line.strip()) > 3 and not line.strip().isdigit():
                     potential_vendors.append(line.strip())
-        
+                    
         # Add vendor detection markers to help the AI
         if potential_vendors:
             vendor_text = "\n### POTENTIAL VENDORS ###\n"
@@ -198,44 +197,16 @@ def extract_text_from_pdf(pdf_path):
         with pdfplumber.open(pdf_path) as pdf:
             text = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
         return text
-        
-    except Exception as e:
-        logger.error(f"Error in PDF extraction: {str(e)}")
-        # Fall back to regular text extraction
-        with pdfplumber.open(pdf_path) as pdf:
-            text = "\n".join(page.extract_text() for page in pdf.pages if page.extract_text())
-        return text
 
-def process_with_openai(text, config):
-    """Process text with OpenAI API - with improved vendor and sizing extraction"""
+def encode_pdf_for_claude(pdf_path):
+    """Encode PDF file to base64 for Claude API"""
     try:
-        # Set API key from environment or config
-        if os.getenv("OPENAI_API_KEY"):
-            openai.api_key = os.getenv("OPENAI_API_KEY")
-        else:
-            openai.api_key = config["openai_api_key"]
-            
-        # Look for potential vendor information
-        vendor_info = []
-        for line in text.split('\n'):
-            if line.startswith("POTENTIAL VENDOR:"):
-                vendor = line.replace("POTENTIAL VENDOR:", "").strip()
-                vendor_info.append(vendor)
-        
-        vendor_guidance = ""
-        if vendor_info:
-            vendor_guidance = f"""
-- The document mentions these potential vendors: {', '.join(vendor_info)}
-- Identify the CORRECT vendor for each product
-- Look at document headers, logos, and branding to determine the true vendor name
-- Different products may come from different vendors"""
-        else:
-            vendor_guidance = """
-- Look for the vendor/brand name at the top of the document or in headers
-- The vendor is typically the company SELLING the products, not the customer
-- All products in a PO typically come from the same vendor, but verify this"""
-        
-        # Improved prompt with better vendor detection and exact sizing extraction
+        with open(pdf_path, "rb") as pdf_file:
+            return base64.b64encode(pdf_file.read()).decode("utf-8")
+    except Exception as e:
+        logger.error(f"Error encoding PDF: {str(e)}")
+        raise
+
 def process_with_claude(pdf_path, config):
     """Process PDF with Claude API for better extraction"""
     try:
@@ -409,23 +380,6 @@ Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product im
     except Exception as e:
         logger.error(f"Error processing with Claude: {str(e)}")
         raise
-            
-            response = openai.ChatCompletion.create(
-                model=config["model"],
-                messages=[{"role": "user", "content": backup_prompt}],
-                temperature=0.1
-            )
-            result = response['choices'][0]['message']['content']
-            
-        # Log result for debugging
-        logger.info("Extraction result:")
-        logger.info(result)
-        
-        return result
-    
-    except Exception as e:
-        logger.error(f"Error processing with OpenAI: {str(e)}")
-        raise
 
 def parse_csv_data(csv_data):
     """Parse CSV data into a DataFrame with enhanced error handling"""
@@ -483,7 +437,7 @@ def parse_csv_data(csv_data):
         
         # Log the cleaned CSV for debugging
         logger.info("Cleaned CSV data:")
-        logger.info(clean_csv)
+        logger.info(clean_csv[:500] + "..." if len(clean_csv) > 500 else clean_csv)
         
         # First try with standard parsing
         try:
@@ -543,7 +497,7 @@ def parse_csv_data(csv_data):
         
         # Print the raw CSV data for debugging
         logger.error("Raw CSV data for debugging:")
-        logger.error(csv_data)
+        logger.error(csv_data[:500] + "..." if len(csv_data) > 500 else csv_data)
         
         raise
 
@@ -582,11 +536,26 @@ def post_process_data(products_df):
             # Remove temporary column
             products_df = products_df.drop(columns=["_temp_key"])
         
+        # ENHANCEMENT: Fix incorrect vendor names
+        if "Vendor" in products_df.columns:
+            for idx, row in products_df.iterrows():
+                vendor = str(row["Vendor"]).strip()
+                
+                # Replace "INVOICE" with a better alternative
+                if vendor.upper() == "INVOICE":
+                    # Try to find vendor name in SKU or title
+                    sku = str(row["SKU"]).lower() if "SKU" in row and pd.notna(row["SKU"]) else ""
+                    title = str(row["Title"]).lower() if "Title" in row and pd.notna(row["Title"]) else ""
+                    
+                    # Look for known patterns in SKUs
+                    if any(pattern in sku for pattern in ["roscoe", "blazer", "buddy"]):
+                        products_df.at[idx, "Vendor"] = "Bailey Boys"
+                    elif "bunny" in title or "bunny" in sku:
+                        products_df.at[idx, "Vendor"] = "Bunnies By The Bay"
+                    # Add other patterns as needed
+        
         # Check for common issues with vendor names
         if "Vendor" in products_df.columns:
-            # Get unique vendors
-            vendors = products_df["Vendor"].unique()
-            
             # Fix obvious vendor errors - vendor should not have size or color in name
             size_pattern = r'(XXS|XS|S|M|L|XL|XXL)'
             
@@ -594,11 +563,23 @@ def post_process_data(products_df):
                 vendor = row["Vendor"]
                 
                 # Fix vendor names that accidentally include size info
-                if re.search(size_pattern, vendor):
+                if pd.notna(vendor) and re.search(size_pattern, str(vendor)):
                     # Try to get the part before the size
-                    parts = re.split(size_pattern, vendor)
+                    parts = re.split(size_pattern, str(vendor))
                     if parts and parts[0].strip():
                         products_df.at[idx, "Vendor"] = parts[0].strip()
+        
+        # ENHANCEMENT: Fix size formatting - remove "Size " prefix from values
+        if "Option1 value" in products_df.columns:
+            for idx, row in products_df.iterrows():
+                size = str(row["Option1 value"]).strip()
+                
+                # Remove "Size " prefix if present
+                if size.startswith("Size "):
+                    size = size.replace("Size ", "")
+                
+                # Store clean size value
+                products_df.at[idx, "Option1 value"] = size
         
         # Handle product images
         if "Product image URL" in products_df.columns:
@@ -609,7 +590,7 @@ def post_process_data(products_df):
             for idx, row in products_df.iterrows():
                 if "SKU" in row and pd.notna(row["SKU"]) and "Product image URL" in row:
                     url = row["Product image URL"]
-                    if url and str(url).strip():
+                    if pd.notna(url) and str(url).strip():
                         valid_urls[row["SKU"]] = url
             
             # Second pass - apply URLs to all rows with same SKU
@@ -625,136 +606,12 @@ def post_process_data(products_df):
             # Convert quantity to numeric first
             products_df["Quantity"] = pd.to_numeric(products_df["Quantity"], errors='coerce')
             products_df = products_df[products_df["Quantity"] > 0]
-        # ENHANCEMENT: Fix incorrect vendor names
-if "Vendor" in products_df.columns:
-    for idx, row in products_df.iterrows():
-        vendor = str(row["Vendor"]).strip()
-        
-        # Replace "INVOICE" with a better alternative
-        if vendor.upper() == "INVOICE":
-            # Try to find vendor name in SKU or title
-            sku = str(row["SKU"]).lower() if "SKU" in row and pd.notna(row["SKU"]) else ""
-            title = str(row["Title"]).lower() if "Title" in row and pd.notna(row["Title"]) else ""
             
-            # Look for known patterns in SKUs
-            if any(pattern in sku for pattern in ["roscoe", "blazer", "buddy"]):
-                products_df.at[idx, "Vendor"] = "Bailey Boys"
-            elif "bunny" in title or "bunny" in sku:
-                products_df.at[idx, "Vendor"] = "Bunnies By The Bay"
-            # Add other patterns as needed
-
-# ENHANCEMENT: Fix product titles - remove dashes, apply title case, etc.
-if "Title" in products_df.columns:
-    for idx, row in products_df.iterrows():
-        title = str(row["Title"])
-        
-        # Clean up the title (remove dashes, apply title case)
-        title = title.replace('-', ' ')
-        words = title.split()
-        if words:
-            # Keep the style name (first word typically)
-            style_name = words[0].capitalize()
-            
-            # Get product type and color
-            product_type = str(row["Type"]).strip() if "Type" in row and pd.notna(row["Type"]) else ""
-            color = str(row["Option2 value"]).strip() if "Option2 value" in row and pd.notna(row["Option2 value"]) else ""
-            
-            # Get vendor
-            vendor = str(row["Vendor"]).strip() if "Vendor" in row and pd.notna(row["Vendor"]) else ""
-            
-            # Format according to guidelines
-            if product_type and color:
-                if any(child_type in product_type.lower() for child_type in ["girls", "boys", "children"]):
-                    # Children's format includes vendor
-                    if vendor and vendor.lower() != "invoice":
-                        title = f"{vendor} {style_name} {product_type} in {color}"
-                    else:
-                        title = f"{style_name} {product_type} in {color}"
-                elif "baby" in product_type.lower():
-                    # Baby format includes vendor
-                    if vendor and vendor.lower() != "invoice":
-                        title = f"{vendor} {style_name} {product_type} in {color}"
-                    else:
-                        title = f"{style_name} {product_type} in {color}"
-                else:
-                    # Women's format doesn't include vendor
-                    title = f"{style_name} {product_type} in {color}"
-        
-        products_df.at[idx, "Title"] = title
-
-# ENHANCEMENT: Fix size formatting - remove "Size " prefix from values
-if "Option1 value" in products_df.columns:
-    for idx, row in products_df.iterrows():
-        size = str(row["Option1 value"]).strip()
-        
-        # Remove "Size " prefix if present
-        if size.startswith("Size "):
-            size = size.replace("Size ", "")
-        
-        # Store clean size value
-        products_df.at[idx, "Option1 value"] = size    
-        # ENHANCEMENT: Fix incorrect vendor names
-    if "Vendor" in products_df.columns:
-        for idx, row in products_df.iterrows():
-            vendor = str(row["Vendor"]).strip()
-            
-            # Replace "INVOICE" with a better alternative
-            if vendor.upper() == "INVOICE":
-                # Try to find vendor name in SKU or title
-                sku = str(row["SKU"]).lower() if "SKU" in row and pd.notna(row["SKU"]) else ""
-                title = str(row["Title"]).lower() if "Title" in row and pd.notna(row["Title"]) else ""
-                
-                # Look for known patterns in SKUs
-                if any(pattern in sku for pattern in ["roscoe", "blazer", "buddy"]):
-                    products_df.at[idx, "Vendor"] = "Bailey Boys"
-                elif "bunny" in title or "bunny" in sku:
-                    products_df.at[idx, "Vendor"] = "Bunnies By The Bay"
-                # Add other patterns as needed
-
-    # ENHANCEMENT: Fix size formatting - remove "Size " prefix from values
-    if "Option1 value" in products_df.columns:
-        for idx, row in products_df.iterrows():
-            size = str(row["Option1 value"]).strip()
-            
-            # Remove "Size " prefix if present
-            if size.startswith("Size "):
-                size = size.replace("Size ", "")
-            
-            # Store clean size value
-            products_df.at[idx, "Option1 value"] = size
         return products_df
     except Exception as e:
         logger.error(f"Error in post-processing: {str(e)}")
         return products_df  # Return original dataframe if post-processing fails
-# ENHANCEMENT: Fix incorrect vendor names
-    if "Vendor" in products_df.columns:
-        for idx, row in products_df.iterrows():
-            vendor = str(row["Vendor"]).strip()
-            
-            # Replace "INVOICE" with a better alternative
-            if vendor.upper() == "INVOICE":
-                # Try to find vendor name in SKU or title
-                sku = str(row["SKU"]).lower() if "SKU" in row and pd.notna(row["SKU"]) else ""
-                title = str(row["Title"]).lower() if "Title" in row and pd.notna(row["Title"]) else ""
-                
-                # Look for known patterns in SKUs
-                if any(pattern in sku for pattern in ["roscoe", "blazer", "buddy"]):
-                    products_df.at[idx, "Vendor"] = "Bailey Boys"
-                elif "bunny" in title or "bunny" in sku:
-                    products_df.at[idx, "Vendor"] = "Bunnies By The Bay"
-                # Add other patterns as needed
 
-    # ENHANCEMENT: Fix size formatting - remove "Size " prefix from values
-    if "Option1 value" in products_df.columns:
-        for idx, row in products_df.iterrows():
-            size = str(row["Option1 value"]).strip()
-            
-            # Remove "Size " prefix if present
-            if size.startswith("Size "):
-                size = size.replace("Size ", "")
-            
-            # Store clean size value
-            products_df.at[idx, "Option1 value"] = size
 def format_for_shopify(products_df):
     """Format the DataFrame for Shopify import with improved handling"""
     try:
@@ -778,18 +635,6 @@ def format_for_shopify(products_df):
                 products_df[price_col] = products_df[price_col].apply(
                     lambda x: float(str(x).replace('USD', '').replace('$', '').strip()) if pd.notna(x) and str(x).strip() != '' else None
                 )
-        
-        # Calculate price (use MSRP if available, otherwise use Wholesale Price * 2)
-        def calculate_price(row):
-            try:
-                if "MSRP" in row and pd.notna(row["MSRP"]) and row["MSRP"] != 0:
-                    return float(row["MSRP"])
-                elif "Wholesale Price" in row and pd.notna(row["Wholesale Price"]):
-                    return float(row["Wholesale Price"]) * 2
-                else:
-                    return None
-            except:
-                return None
         
         # Create new DataFrame with Shopify columns
         shopify_df = pd.DataFrame()
@@ -861,134 +706,4 @@ def format_for_shopify(products_df):
         return shopify_csv
     
     except Exception as e:
-        logger.error(f"Error formatting for Shopify: {str(e)}")
-        # Print more debug info
-        logger.error(f"DataFrame info: {type(products_df)}")
-        if isinstance(products_df, pd.DataFrame):
-            logger.error(f"DataFrame columns: {products_df.columns.tolist()}")
-            logger.error(f"DataFrame sample: {products_df.head().to_dict()}")
-        raise
-
-def pdf_to_shopify_csv(pdf_path, output_path=None, config=None):
-    """Convert a PDF to a Shopify-compatible CSV"""
-    if config is None:
-        config = load_config()
-    
-    if output_path is None:
-        pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = os.path.join(config["output_dir"], f"{pdf_name}_{timestamp}.csv")
-    
-    try:
-        logger.info(f"Processing PDF: {pdf_path}")
-        
-        # Extract text from PDF
-        text = extract_text_from_pdf(pdf_path)
-        
-        # Process with OpenAI
-        csv_data = process_with_openai(text, config)
-        
-        # Parse CSV data
-        products_df = parse_csv_data(csv_data)
-        
-        # Format for Shopify
-        shopify_csv = format_for_shopify(products_df)
-        
-        # Save to CSV
-        shopify_csv.to_csv(output_path, index=False)
-        
-        logger.info(f"Successfully converted {pdf_path} to {output_path}")
-        return output_path
-    
-    except Exception as e:
-        logger.error(f"Error converting PDF to CSV: {str(e)}")
-        raise
-
-def process_directory(directory=None, config=None):
-    """Process all PDFs in a directory"""
-    if config is None:
-        config = load_config()
-    
-    if directory is None:
-        directory = config["watch_dir"]
-    
-    logger.info(f"Processing directory: {directory}")
-    
-    pdf_files = [os.path.join(directory, f) for f in os.listdir(directory) 
-                  if f.lower().endswith('.pdf') and os.path.isfile(os.path.join(directory, f))]
-    
-    results = []
-    for pdf_file in pdf_files:
-        try:
-            output_path = pdf_to_shopify_csv(pdf_file, config=config)
-            results.append({"input": pdf_file, "output": output_path, "success": True})
-            
-            # Move processed file to prevent reprocessing
-            processed_dir = os.path.join(directory, "processed")
-            os.makedirs(processed_dir, exist_ok=True)
-            processed_path = os.path.join(processed_dir, os.path.basename(pdf_file))
-            os.rename(pdf_file, processed_path)
-            
-        except Exception as e:
-            logger.error(f"Failed to process {pdf_file}: {str(e)}")
-            results.append({"input": pdf_file, "error": str(e), "success": False})
-    
-    return results
-
-if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Convert PDFs to Shopify-compatible CSVs")
-    parser.add_argument("--pdf", help="Path to a single PDF file to convert")
-    parser.add_argument("--output", help="Output path for the CSV file")
-    parser.add_argument("--dir", help="Directory containing PDFs to convert")
-    parser.add_argument("--watch", action="store_true", help="Watch directory for new PDFs")
-    
-    args = parser.parse_args()
-    
-    try:
-        config = load_config()
-        
-        if args.pdf:
-            pdf_to_shopify_csv(args.pdf, args.output, config)
-        
-        elif args.dir:
-            process_directory(args.dir, config)
-        
-        elif args.watch:
-            import time
-            from watchdog.observers import Observer
-            from watchdog.events import FileSystemEventHandler
-            
-            class PDFHandler(FileSystemEventHandler):
-                def on_created(self, event):
-                    if event.is_directory:
-                        return
-                    if event.src_path.lower().endswith('.pdf'):
-                        logger.info(f"New PDF detected: {event.src_path}")
-                        try:
-                            pdf_to_shopify_csv(event.src_path, config=config)
-                        except Exception as e:
-                            logger.error(f"Error processing new PDF: {str(e)}")
-            
-            watch_dir = config["watch_dir"]
-            logger.info(f"Watching directory: {watch_dir}")
-            
-            event_handler = PDFHandler()
-            observer = Observer()
-            observer.schedule(event_handler, watch_dir, recursive=False)
-            observer.start()
-            
-            try:
-                while True:
-                    time.sleep(1)
-            except KeyboardInterrupt:
-                observer.stop()
-            observer.join()
-        
-        else:
-            process_directory(config=config)
-    
-    except Exception as e:
-        logger.error(f"Error: {str(e)}")
-        sys.exit(1)
+        logger.error(f"Error formatting for
