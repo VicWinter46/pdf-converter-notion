@@ -451,11 +451,3 @@ def parse_csv_data(csv_data):
                         if len(fields) > len(header_fields):
                             fields = fields[:len(header_fields)]
                         data_rows.append(dict(zip(header_fields, fields)))
-                    
-                    if data_rows:
-                        return pd.DataFrame(data_rows)
-                    else:
-                        raise ValueError("Failed to parse CSV data with all methods")
-    except Exception as e:
-        logger.error(f"Error parsing CSV data: {e}")
-       
