@@ -34,13 +34,13 @@ load_dotenv()
 logger.info("ALL ENVIRONMENT VARIABLES:")
 for key, value in os.environ.items():
     # Be careful not to log sensitive information like API keys
-    if key in ['TO_CONVERT_FOLDER_ID', 'CONVERTED_FOLDER_ID', 'PROCESSED_FOLDER_ID']:
+    if key in ['GOOGLE_DRIVE_TO_CONVERT_FOLDER_ID', 'GOOGLE_DRIVE_CONVERTED_FOLDER_ID', 'GOOGLE_DRIVE_PROCESSED_FOLDER_ID']:
         logger.info(f"{key}: {value}")
 
 # Google Drive folders from environment variables
-TO_CONVERT_FOLDER_ID = os.getenv('TO_CONVERT_FOLDER_ID')
-CONVERTED_FOLDER_ID = os.getenv('CONVERTED_FOLDER_ID')
-PROCESSED_FOLDER_ID = os.getenv('PROCESSED_FOLDER_ID')
+TO_CONVERT_FOLDER_ID = os.getenv('GOOGLE_DRIVE_TO_CONVERT_FOLDER_ID')
+CONVERTED_FOLDER_ID = os.getenv('GOOGLE_DRIVE_CONVERTED_FOLDER_ID')
+PROCESSED_FOLDER_ID = os.getenv('GOOGLE_DRIVE_PROCESSED_FOLDER_ID')
 
 def get_drive_service():
     """Authenticate and create Google Drive service using pickle token"""
