@@ -706,4 +706,131 @@ def format_for_shopify(products_df):
         return shopify_csv
     
     except Exception as e:
-        logger.error(f"Error formatting for
+        logger.error(f"Error formatting for Shopify: {str(e)}")
+# Print more debug info
+        logger.error(f"DataFrame info: {type(products_df)}")
+        if isinstance(products_df, pd.DataFrame):
+            logger.error(f"DataFrame columns: {products_df.columns.tolist()}")
+            logger.error(f"DataFrame sample: {products_df.head().to_dict()}")
+        raise
+
+def pdf_to_shopify_csv(pdf_path, output_path=None, config=None):
+    """Convert a PDF to a Shopify-compatible CSV using Claude"""
+    if config is None:
+        config = load_config()
+    
+    if output_path is None:
+        pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(config["output_dir"], f"{pdf_name}_{timestamp}.csv")
+    
+    try:
+        logger.info(f"Processing PDF: {pdf_path}")
+        
+        # Process with Claude
+        csv_data = process_with_claude(pdf_path, config)
+        
+        # Parse CSV data
+        products_df = parse_csv_data(csv_data)
+        
+        # Format for Shopify
+        shopify_csv = format_for_shopify(products_df)
+        
+        # Save to CSV
+        shopify_csv.to_csv(output_path, index=False)
+        
+        logger.info(f"Successfully converted {pdf_path} to {output_path}")
+        return output_path
+    
+    except Exception as e:
+        logger.error(f"Error converting PDF to CSV: {str(e)}")
+        raise
+
+def process_directory(directory=None, config=None):
+    """Process all PDFs in a directory"""
+    if config is None:
+        config = load_config()
+    
+    if directory is None:
+        directory = config["watch_dir"]
+    
+    logger.info(f"Processing directory: {directory}")
+    
+    pdf_files = [os.path.join(directory, f) for f in os.listdir(directory) 
+                  if f.lower().endswith('.pdf') and os.path.isfile(os.path.join(directory, f))]
+    
+    results = []
+    for pdf_file in pdf_files:
+        try:
+            output_path = pdf_to_shopify_csv(pdf_file, config=config)
+            results.append({"input": pdf_file, "output": output_path, "success": True})
+            
+            # Move processed file to prevent reprocessing
+            processed_dir = os.path.join(directory, "processed")
+            os.makedirs(processed_dir, exist_ok=True)
+            processed_path = os.path.join(processed_dir, os.path.basename(pdf_file))
+            os.rename(pdf_file, processed_path)
+            
+        except Exception as e:
+            logger.error(f"Failed to process {pdf_file}: {str(e)}")
+            results.append({"input": pdf_file, "error": str(e), "success": False})
+    
+    return results
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Convert PDFs to Shopify-compatible CSVs using Claude")
+    parser.add_argument("--pdf", help="Path to a single PDF file to convert")
+    parser.add_argument("--output", help="Output path for the CSV file")
+    parser.add_argument("--dir", help="Directory containing PDFs to convert")
+    parser.add_argument("--watch", action="store_true", help="Watch directory for new PDFs")
+    
+    args = parser.parse_args()
+    
+    try:
+        config = load_config()
+        
+        if args.pdf:
+            pdf_to_shopify_csv(args.pdf, args.output, config)
+        
+        elif args.dir:
+            process_directory(args.dir, config)
+        
+        elif args.watch:
+            import time
+            from watchdog.observers import Observer
+            from watchdog.events import FileSystemEventHandler
+            
+            class PDFHandler(FileSystemEventHandler):
+                def on_created(self, event):
+                    if event.is_directory:
+                        return
+                    if event.src_path.lower().endswith('.pdf'):
+                        logger.info(f"New PDF detected: {event.src_path}")
+                        try:
+                            pdf_to_shopify_csv(event.src_path, config=config)
+                        except Exception as e:
+                            logger.error(f"Error processing new PDF: {str(e)}")
+            
+            watch_dir = config["watch_dir"]
+            logger.info(f"Watching directory: {watch_dir}")
+            
+            event_handler = PDFHandler()
+            observer = Observer()
+            observer.schedule(event_handler, watch_dir, recursive=False)
+            observer.start()
+            
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                observer.stop()
+            observer.join()
+        
+        else:
+            process_directory(config=config)
+    
+    except Exception as e:
+        logger.error(f"Error: {str(e)}")
+        sys.exit(1)
