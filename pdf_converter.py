@@ -449,4 +449,6 @@ def parse_csv_data(csv_data):
                         for j in range(min(len(header_fields), len(fields))):
                             row[header_fields[j]] = fields[j]
                         data.append(row)
-                    products_df = pd.Data
+                    products_df = pd.DataFrame(data)
+                    return products_df
+    except Exception as e
