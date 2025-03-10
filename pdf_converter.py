@@ -441,4 +441,21 @@ def parse_csv_data(csv_data):
                     return products_df
                 except Exception:
                     logger.info("Trying manual parsing...")
-                    header_fields = fixed_lines[0].split
+                    header_fields = fixed_lines[0].split(',')
+                    data_rows = []
+                    for line in fixed_lines[1:]:
+                        fields = line.split(',')
+                        # Ensure we have the right number of fields
+                        while len(fields) < len(header_fields):
+                            fields.append('')
+                        if len(fields) > len(header_fields):
+                            fields = fields[:len(header_fields)]
+                        data_rows.append(dict(zip(header_fields, fields)))
+                    
+                    if data_rows:
+                        return pd.DataFrame(data_rows)
+                    else:
+                        raise ValueError("Failed to parse CSV data with all methods")
+    except Exception as e:
+        logger.error(f"Error parsing CSV data: {e}")
+       
