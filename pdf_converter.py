@@ -4,7 +4,7 @@ pdf_converter.py
 
 This script converts PDFs into Shopify-compatible CSVs using advanced text extraction and the Anthropic Claude API.
 It extracts text (including vendor hints, image links, and quantity info), sends an enhanced prompt (with the PDF's Base64 string appended)
-to Claude, and then parses the CSV output into a final CSV file for Shopify with only the essential fields.
+to Claude, and then parses the CSV output into a final CSV file for Shopify.
 """
 
 import os
@@ -74,7 +74,7 @@ def load_config():
         "watch_dir": "watch",
         "prompt_template": (
             "Extract product details in CSV format:\n"
-            "Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product image URL\n\n"
+            "Product Title,Body (HTML),Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color\n\n"
             "If MSRP is missing, use Wholesale Price.\n"
             "Sizes should be standardized (XS, S, M, L, XL, 0-3 M, 2T, etc.).\n"
             "Only include Color if multiple colors exist.\n\n"
@@ -295,14 +295,17 @@ def process_with_claude(pdf_path, config):
 
         pdf_base64 = encode_pdf_for_claude(pdf_path)
 
-        # Import Anthropic client
+        # Import and monkey-patch the Anthropic client to ignore any 'proxies' keyword argument.
         import anthropic
+        original_init = anthropic.Client.__init__
 
-        # Create a dictionary of kwargs without 'proxies'
-        client_kwargs = {"api_key": api_key}
+        def patched_init(self, *args, **kwargs):
+            kwargs.pop("proxies", None)
+            return original_init(self, *args, **kwargs)
 
-        # Create the client with only the valid parameters
-        client = anthropic.Client(**client_kwargs)
+        anthropic.Client.__init__ = patched_init
+
+        client = anthropic.Client(api_key=api_key)
 
         enhanced_prompt = (
             "Extract detailed product information from this purchase order for a Shopify import.\n\n"
@@ -312,32 +315,21 @@ def process_with_claude(pdf_path, config):
             f"   - {vendor_guidance}\n"
             "   - Do NOT use \"INVOICE\" as the vendor name\n"
             "   - The vendor is the company MAKING the products, not the customer receiving them\n\n"
-            "2. PRODUCT TYPE:\n"
-            "   - This field is CRITICAL - be specific about the product category\n"
-            "   - Examples: T-Shirt, Jeans, Dress, Sweater, etc.\n"
-            "   - Do NOT use generic terms like \"Apparel\" or \"Clothing\"\n\n"
-            "3. SIZE EXTRACTION:\n"
+            "2. SIZE EXTRACTION:\n"
             "   - ONLY extract sizes that have quantities greater than 0\n"
             "   - Look for sections showing sizes and quantities together\n"
             "   - Create a separate row for EACH SIZE with a non-zero quantity\n"
             "   - Skip any sizes that show quantity 0 or no quantity\n"
             "   - Common sizes include: XXS, XS, S, M, L, XL, XXL\n"
             "   - IMPORTANT: Return JUST the size value WITHOUT \"Size \" prefix\n\n"
-            "4. COLOR EXTRACTION:\n"
-            "   - ONLY include Color if multiple colors exist for a product\n"
-            "   - If all products have the same color, leave the Color field empty\n\n"
-            "5. TITLE FORMAT:\n"
+            "3. TITLE FORMAT:\n"
             "   - DO NOT use dashes in titles, use spaces instead\n"
             "   - Use Title Case For All Words\n"
             "   - Include color in title when available (format: \"in Color\")\n\n"
-            "6. SKU AND STYLE NUMBERS:\n"
+            "4. SKU AND STYLE NUMBERS:\n"
             "   - Use the exact style/item number as the SKU (e.g., \"336537\", \"342348\")\n"
             "   - Look for numbers following \"Style #\", \"Item #\", or similar labels\n\n"
-            "7. COST PRICE:\n"
-            "   - This field is CRITICAL\n"
-            "   - Capture the wholesale price or cost price exactly as shown\n"
-            "   - If only retail price is given, note that in the description\n\n"
-            "8. IMAGES: \n"
+            "5. IMAGES: \n"
             "   - Extract any image URLs if present in the document\n"
             "   - If no URLs are available, leave the field empty\n\n"
             "### TABLE FORMAT:\n"
@@ -366,11 +358,9 @@ def process_with_claude(pdf_path, config):
                 "Extract all products from this purchase order into a CSV table.\n\n"
                 "For each product in the PDF:\n"
                 "1. Get the Product Title, Vendor, Product Type, SKU, Price information\n"
-                "2. PRODUCT TYPE is CRITICAL - be specific (e.g., 'T-Shirt', not 'Apparel')\n"
-                "3. COST PRICE (wholesale price) is CRITICAL - extract accurately\n"
-                "4. Extract all sizes with quantities > 0\n"
-                "5. Include colors ONLY if multiple colors exist for a product\n"
-                "6. Create a separate row for each size variation\n\n"
+                "2. Extract all sizes with quantities > 0\n"
+                "3. Include colors if available\n"
+                "4. Create a separate row for each size variation\n\n"
                 "Return ONLY the CSV with this header (no explanations):\n"
                 "Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product image URL,Quantity\n\n"
                 "Attached PDF (Base64):\n" + pdf_base64
@@ -434,7 +424,7 @@ def parse_csv_data(csv_data):
                 fixed_lines.append(",".join(fixed_line))
             else:
                 fixed_lines.append(line)
-        clean_csv = "\n".join(fixed_lines)
+        clean_csv = "\n.join(fixed_lines)
         logger.info("Cleaned CSV data (first 500 chars): " + (clean_csv[:500] + "..." if len(clean_csv) > 500 else clean_csv))
         try:
             products_df = pd.read_csv(StringIO(clean_csv))
@@ -462,337 +452,9 @@ def parse_csv_data(csv_data):
                             fields = fields[:len(header_fields)]
                         data_rows.append(dict(zip(header_fields, fields)))
                     
-                    # Construct a DataFrame from the manually parsed data
-                    return pd.DataFrame(data_rows)
+                    if data_rows:
+                        return pd.DataFrame(data_rows)
+                    else:
+                        raise ValueError("Failed to parse CSV data with all methods")
     except Exception as e:
         logger.error(f"Error parsing CSV data: {e}")
-        raise
-
-def convert_to_simplified_shopify_format(products_df):
-    """
-    Convert the DataFrame into a simplified Shopify-compatible CSV format
-    with only the requested essential fields.
-
-    Args:
-        products_df (pandas.DataFrame): DataFrame with product information.
-    Returns:
-        pandas.DataFrame: Simplified Shopify-formatted DataFrame.
-    """
-    try:
-        shopify_df = products_df.copy()
-        
-        # Check for required columns
-        required_columns = ["Product Title", "Vendor", "Product Type", "SKU", "Wholesale Price"]
-        missing_columns = [col for col in required_columns if col not in shopify_df.columns]
-        
-        # If missing required columns, try alternate names
-        column_name_map = {
-            "Title": "Product Title",
-            "Brand": "Vendor",
-            "Style Number": "SKU",
-            "Style #": "SKU",
-            "Item Number": "SKU",
-            "Item #": "SKU",
-            "Price": "Wholesale Price",
-            "Cost": "Wholesale Price",
-            "Retail Price": "MSRP",
-            "Sell Price": "MSRP"
-        }
-        
-        for alt_name, std_name in column_name_map.items():
-            if std_name in missing_columns and alt_name in shopify_df.columns:
-                shopify_df[std_name] = shopify_df[alt_name]
-                missing_columns.remove(std_name)
-        
-        if missing_columns:
-            logger.warning(f"Missing required columns even after mapping: {missing_columns}")
-            # Create missing columns with empty values
-            for col in missing_columns:
-                shopify_df[col] = ""
-        
-        # Create handle from title
-        shopify_df["Handle"] = shopify_df["Product Title"].str.lower().str.replace(r'[^\w\s]', '', regex=True).str.replace(r'\s+', '-', regex=True)
-        
-        # Create Body/Description from title as requested
-        shopify_df["Body (HTML)"] = shopify_df["Product Title"]
-        
-        # Set Status to draft as requested
-        shopify_df["Status"] = "draft"
-        
-        # Set inventory to 0 as requested
-        shopify_df["Inventory Quantity"] = 0
-        
-        # Set continue selling when out of stock to FALSE
-        shopify_df["Continue selling when out of stock"] = "FALSE"
-        
-        # Map Size and Color to Option fields
-        shopify_df["Option1 Name"] = "Size"
-        shopify_df["Option1 Value"] = shopify_df.get("Size", "")
-        shopify_df["Option2 Name"] = "Color"
-        shopify_df["Option2 Value"] = shopify_df.get("Color", "")
-        
-        # Set Price and Cost fields
-        shopify_df["Price"] = shopify_df.get("MSRP", shopify_df.get("Wholesale Price", ""))
-        shopify_df["Cost per item"] = shopify_df.get("Wholesale Price", "")
-        
-        # Select only the requested fields for the final output
-        essential_fields = [
-            "Handle", 
-            "Product Title", 
-            "Body (HTML)", 
-            "Vendor", 
-            "Product Type", 
-            "Status",
-            "SKU", 
-            "Option1 Name", 
-            "Option1 Value", 
-            "Option2 Name", 
-            "Option2 Value", 
-            "Price", 
-            "Cost per item", 
-            "Continue selling when out of stock",
-            "Product image URL"
-        ]
-        
-        # Create a new DataFrame with only the requested fields
-        output_df = pd.DataFrame()
-        for field in essential_fields:
-            if field in shopify_df.columns:
-                output_df[field] = shopify_df[field]
-            else:
-                output_df[field] = ""
-        
-        return output_df
-    
-    except Exception as e:
-        logger.error(f"Error converting to simplified Shopify format: {e}")
-        raise
-
-def save_to_csv(df, filename, output_dir):
-    """
-    Save the DataFrame to a CSV file in the output directory.
-
-    Args:
-        df (pandas.DataFrame): DataFrame to save.
-        filename (str): Base filename.
-        output_dir (str): Output directory path.
-    Returns:
-        str: Path to the output CSV file.
-    """
-    try:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_name = os.path.splitext(os.path.basename(filename))[0]
-        output_filename = f"{base_name}_{timestamp}.csv"
-        output_path = os.path.join(output_dir, output_filename)
-        
-        df.to_csv(output_path, index=False, quoting=csv.QUOTE_ALL)
-        logger.info(f"Saved output to {output_path}")
-        return output_path
-    
-    except Exception as e:
-        logger.error(f"Error saving CSV file: {e}")
-        raise
-
-def update_database(client, filename, status, processed_at=None):
-    """
-    Update the status of a file in the database.
-
-    Args:
-        client (str): Client identifier.
-        filename (str): Filename.
-        status (str): Processing status (e.g., 'success', 'error').
-        processed_at (str, optional): Processing timestamp.
-    """
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        # Check if file exists in database
-        cursor.execute("SELECT id FROM files WHERE filename = ?", (filename,))
-        result = cursor.fetchone()
-        
-        if result:
-            # Update existing record
-            if processed_at:
-                cursor.execute(
-                    "UPDATE files SET status = ?, processed_at = ? WHERE filename = ?",
-                    (status, processed_at, filename)
-                )
-            else:
-                cursor.execute(
-                    "UPDATE files SET status = ? WHERE filename = ?",
-                    (status, filename)
-                )
-        else:
-            # Insert new record
-            uploaded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            if processed_at:
-                cursor.execute(
-                    "INSERT INTO files (client, filename, status, uploaded_at, processed_at) VALUES (?, ?, ?, ?, ?)",
-                    (client, filename, status, uploaded_at, processed_at)
-                )
-            else:
-                cursor.execute(
-                    "INSERT INTO files (client, filename, status, uploaded_at) VALUES (?, ?, ?, ?)",
-                    (client, filename, status, uploaded_at)
-                )
-        
-        conn.commit()
-        conn.close()
-    
-    except Exception as e:
-        logger.error(f"Error updating database: {e}")
-
-def pdf_to_shopify_csv(pdf_path, output_dir=None, client="default", config=None):
-    """
-    Convert a PDF file to Shopify-compatible CSV.
-    This function serves as the main entry point for external scripts.
-
-    Args:
-        pdf_path (str): Path to the PDF file.
-        output_dir (str, optional): Output directory. If None, uses the configured output dir.
-        client (str, optional): Client identifier. Defaults to "default".
-        config (dict, optional): Configuration dictionary. If None, will be loaded.
-    
-    Returns:
-        str: Path to the output CSV file, or None if processing failed.
-    """
-    if not config:
-        config = load_config()
-    
-    if output_dir:
-        original_output_dir = config["output_dir"]
-        config["output_dir"] = output_dir
-        os.makedirs(output_dir, exist_ok=True)
-    
-    try:
-        return process_pdf(pdf_path, client, config)
-    finally:
-        if output_dir:
-            config["output_dir"] = original_output_dir
-
-def process_pdf(pdf_path, client="default", config=None):
-    """
-    Process a single PDF file and convert it to a simplified Shopify-compatible CSV.
-
-    Args:
-        pdf_path (str): Path to the PDF file.
-        client (str, optional): Client identifier. Defaults to "default".
-        config (dict, optional): Configuration dictionary. If None, will be loaded.
-    Returns:
-        str: Path to the output CSV file, or None if processing failed.
-    """
-    if not config:
-        config = load_config()
-    
-    filename = os.path.basename(pdf_path)
-    logger.info(f"Processing PDF: {filename} for client: {client}")
-    
-    try:
-        # Update database - processing started
-        update_database(client, filename, "processing")
-        
-        # Extract CSV data from PDF using Claude
-        csv_data = process_with_claude(pdf_path, config)
-        
-        # Parse CSV data into DataFrame
-        products_df = parse_csv_data(csv_data)
-        
-        # Convert to simplified Shopify format with only essential fields
-        shopify_df = convert_to_simplified_shopify_format(products_df)
-        
-        # Save to CSV
-        output_path = save_to_csv(shopify_df, filename, config["output_dir"])
-        
-        # Update database - processing complete
-        processed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        update_database(client, filename, "success", processed_at)
-        
-        logger.info(f"Successfully processed {filename}")
-        return output_path
-    
-    except Exception as e:
-        logger.error(f"Error processing {filename}: {e}")
-        # Update database - processing failed
-        update_database(client, filename, f"error: {str(e)}")
-        return None
-
-def process_watch_directory(config=None):
-    """
-    Monitor the watch directory for new PDF files and process them.
-
-    Args:
-        config (dict, optional): Configuration dictionary. If None, will be loaded.
-    """
-    if not config:
-        config = load_config()
-    
-    watch_dir = config["watch_dir"]
-    logger.info(f"Monitoring watch directory: {watch_dir}")
-    
-    try:
-        pdf_files = [f for f in os.listdir(watch_dir) if f.lower().endswith('.pdf')]
-        if not pdf_files:
-            logger.info("No PDF files found in watch directory.")
-            return
-        
-        logger.info(f"Found {len(pdf_files)} PDF files to process.")
-        for pdf_file in pdf_files:
-            pdf_path = os.path.join(watch_dir, pdf_file)
-            
-            # Extract client name from filename if available
-            client_match = re.match(r'^([^_]+)_', pdf_file)
-            client = client_match.group(1) if client_match else "default"
-            
-            # Process the PDF
-            try:
-                output_path = process_pdf(pdf_path, client, config)
-                if output_path:
-                    # Move processed file to prevent reprocessing
-                    processed_dir = os.path.join(watch_dir, "processed")
-                    os.makedirs(processed_dir, exist_ok=True)
-                    os.rename(pdf_path, os.path.join(processed_dir, pdf_file))
-                    logger.info(f"Moved {pdf_file} to processed directory.")
-            except Exception as e:
-                logger.error(f"Failed to process {pdf_file}: {e}")
-                # Move failed file to prevent reprocessing attempts
-                failed_dir = os.path.join(watch_dir, "failed")
-                os.makedirs(failed_dir, exist_ok=True)
-                os.rename(pdf_path, os.path.join(failed_dir, pdf_file))
-                logger.info(f"Moved {pdf_file} to failed directory.")
-    
-    except Exception as e:
-        logger.error(f"Error monitoring watch directory: {e}")
-
-def main():
-    """
-    Main function that processes command line arguments or runs in watch mode.
-    """
-    try:
-        config = load_config()
-        
-        if len(sys.argv) > 1:
-            # Process specific PDF file(s)
-            for pdf_path in sys.argv[1:]:
-                if os.path.isfile(pdf_path) and pdf_path.lower().endswith('.pdf'):
-                    process_pdf(pdf_path, config=config)
-                else:
-                    logger.error(f"Invalid file path: {pdf_path}")
-        else:
-            # Run in watch mode
-            logger.info("Running in watch mode. Press Ctrl+C to exit.")
-            while True:
-                process_watch_directory(config)
-                logger.info(f"Waiting for new files... (checking every 60 seconds)")
-                time.sleep(60)
-    
-    except KeyboardInterrupt:
-        logger.info("Exiting...")
-    except Exception as e:
-        logger.error(f"Unhandled exception: {e}")
-        return 1
-    
-    return 0
-
-if __name__ == "__main__":
-    sys.exit(main())
