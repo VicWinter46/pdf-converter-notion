@@ -263,9 +263,6 @@ Extract detailed product information from this purchase order for a Shopify impo
 ### TABLE FORMAT:
 Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product image URL,Quantity
 
-DOCUMENT TEXT:
-{text}
-
 Return ONLY properly formatted CSV data with header and data rows. No explanations or other text.
 """
         # Use OpenAI API with specialized prompt
@@ -599,7 +596,35 @@ if "Option1 value" in products_df.columns:
     except Exception as e:
         logger.error(f"Error in post-processing: {str(e)}")
         return products_df  # Return original dataframe if post-processing fails
+# ENHANCEMENT: Fix incorrect vendor names
+    if "Vendor" in products_df.columns:
+        for idx, row in products_df.iterrows():
+            vendor = str(row["Vendor"]).strip()
+            
+            # Replace "INVOICE" with a better alternative
+            if vendor.upper() == "INVOICE":
+                # Try to find vendor name in SKU or title
+                sku = str(row["SKU"]).lower() if "SKU" in row and pd.notna(row["SKU"]) else ""
+                title = str(row["Title"]).lower() if "Title" in row and pd.notna(row["Title"]) else ""
+                
+                # Look for known patterns in SKUs
+                if any(pattern in sku for pattern in ["roscoe", "blazer", "buddy"]):
+                    products_df.at[idx, "Vendor"] = "Bailey Boys"
+                elif "bunny" in title or "bunny" in sku:
+                    products_df.at[idx, "Vendor"] = "Bunnies By The Bay"
+                # Add other patterns as needed
 
+    # ENHANCEMENT: Fix size formatting - remove "Size " prefix from values
+    if "Option1 value" in products_df.columns:
+        for idx, row in products_df.iterrows():
+            size = str(row["Option1 value"]).strip()
+            
+            # Remove "Size " prefix if present
+            if size.startswith("Size "):
+                size = size.replace("Size ", "")
+            
+            # Store clean size value
+            products_df.at[idx, "Option1 value"] = size
 def format_for_shopify(products_df):
     """Format the DataFrame for Shopify import with improved handling"""
     try:
