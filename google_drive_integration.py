@@ -1,6 +1,7 @@
 import os
-import pickle
+import sys
 import time
+import pickle
 import tempfile
 import logging
 import json
@@ -18,12 +19,23 @@ from pdf_converter import pdf_to_shopify_csv, load_config
 # Set up logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),  # Send logs to stdout for Render
+        logging.FileHandler('google_drive_integration.log')  # Also log to a file
+    ]
 )
 logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
+
+# Print all environment variables for debugging
+logger.info("ALL ENVIRONMENT VARIABLES:")
+for key, value in os.environ.items():
+    # Be careful not to log sensitive information like API keys
+    if key in ['TO_CONVERT_FOLDER_ID', 'CONVERTED_FOLDER_ID', 'PROCESSED_FOLDER_ID']:
+        logger.info(f"{key}: {value}")
 
 # Google Drive folders from environment variables
 TO_CONVERT_FOLDER_ID = os.getenv('TO_CONVERT_FOLDER_ID')
@@ -35,19 +47,25 @@ def get_drive_service():
     # If modifying these scopes, delete the file token.pickle.
     SCOPES = ['https://www.googleapis.com/auth/drive']
 
+    logger.info("Attempting to create Drive service...")
+    
     creds = None
     # The file token.pickle stores the user's access and refresh tokens
     if os.path.exists('token.pickle'):
         try:
             with open('token.pickle', 'rb') as token:
                 creds = pickle.load(token)
+            logger.info("Successfully loaded token.pickle")
         except Exception as e:
             logger.error(f"Error loading token.pickle: {e}")
             creds = None
+    else:
+        logger.error("token.pickle file not found!")
     
     # If credentials are invalid or expired, try to refresh
     if creds and creds.expired and creds.refresh_token:
         try:
+            logger.info("Attempting to refresh credentials...")
             creds.refresh(Request())
         except Exception as e:
             logger.error(f"Error refreshing credentials: {e}")
@@ -60,10 +78,97 @@ def get_drive_service():
     
     try:
         # Build and return the Drive service
-        return build('drive', 'v3', credentials=creds)
+        service = build('drive', 'v3', credentials=creds)
+        logger.info("Successfully created Drive service")
+        return service
     except Exception as e:
         logger.error(f"Error creating Drive service: {e}")
         return None
+
+def list_files_in_folder(service, folder_id):
+    """List PDF files in a Google Drive folder"""
+    try:
+        logger.info(f"Attempting to list files in folder: {folder_id}")
+        results = service.files().list(
+            q=f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false",
+            fields="files(id, name)"
+        ).execute()
+        
+        files = results.get('files', [])
+        logger.info(f"Found {len(files)} PDF files in the folder")
+        return files
+    except Exception as e:
+        logger.error(f"Error listing files in folder {folder_id}: {e}")
+        return []
+
+def download_file(service, file_id, file_name):
+    """Download a file from Google Drive"""
+    try:
+        logger.info(f"Attempting to download file: {file_name}")
+        request = service.files().get_media(fileId=file_id)
+        
+        temp_dir = tempfile.gettempdir()
+        file_path = os.path.join(temp_dir, file_name)
+        
+        with io.FileIO(file_path, 'wb') as fh:
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+        
+        logger.info(f"Successfully downloaded {file_name} to {file_path}")
+        return file_path
+    except Exception as e:
+        logger.error(f"Error downloading file {file_id}: {e}")
+        return None
+
+def upload_file(service, file_path, filename, parent_folder_id):
+    """Upload a file to Google Drive"""
+    try:
+        logger.info(f"Attempting to upload file: {filename}")
+        file_metadata = {
+            'name': filename,
+            'parents': [parent_folder_id]
+        }
+        
+        media = MediaFileUpload(
+            file_path,
+            resumable=True
+        )
+        
+        file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id'
+        ).execute()
+        
+        logger.info(f"Successfully uploaded {filename}")
+        return file.get('id')
+    except Exception as e:
+        logger.error(f"Error uploading file {filename}: {e}")
+        return None
+
+def move_file(service, file_id, new_parent_id):
+    """Move a file to a different folder in Google Drive"""
+    try:
+        logger.info(f"Attempting to move file: {file_id}")
+        # Get the current parents
+        file = service.files().get(fileId=file_id, fields='parents').execute()
+        previous_parents = ",".join(file.get('parents'))
+        
+        # Move the file to the new folder
+        service.files().update(
+            fileId=file_id,
+            addParents=new_parent_id,
+            removeParents=previous_parents,
+            fields='id, parents'
+        ).execute()
+        
+        logger.info("Successfully moved file")
+        return True
+    except Exception as e:
+        logger.error(f"Error moving file {file_id}: {e}")
+        return False
 
 def process_pdfs():
     """Main function to process PDFs from Google Drive with enhanced logging"""
@@ -133,22 +238,26 @@ def process_pdfs():
             
             except Exception as file_process_error:
                 logger.error(f"CRITICAL ERROR processing {file_name}: {file_process_error}")
-                # Optionally, you might want to log the full traceback
+                # Log the full traceback
                 import traceback
                 logger.error(traceback.format_exc())
     
     except Exception as list_files_error:
         logger.error(f"Error listing files: {list_files_error}")
 
-# Modify the main loop to include more robust error handling
 if __name__ == "__main__":
     logger.info("Starting Google Drive PDF to CSV Conversion Service")
     
+    # Extensive logging of folder IDs
+    logger.info(f"Folder ID Verification:")
+    logger.info(f"TO_CONVERT_FOLDER_ID: {TO_CONVERT_FOLDER_ID}")
+    logger.info(f"CONVERTED_FOLDER_ID: {CONVERTED_FOLDER_ID}")
+    logger.info(f"PROCESSED_FOLDER_ID: {PROCESSED_FOLDER_ID}")
+    
     # Check if we have the required environment variables
-    if not TO_CONVERT_FOLDER_ID or not CONVERTED_FOLDER_ID or not PROCESSED_FOLDER_ID:
+    if not all([TO_CONVERT_FOLDER_ID, CONVERTED_FOLDER_ID, PROCESSED_FOLDER_ID]):
         logger.critical("MISSING REQUIRED FOLDER IDs. Cannot proceed.")
-        # Exit the script if critical configuration is missing
-        import sys
+        logger.critical(f"Missing IDs: {', '.join([name for name, value in [('TO_CONVERT', TO_CONVERT_FOLDER_ID), ('CONVERTED', CONVERTED_FOLDER_ID), ('PROCESSED', PROCESSED_FOLDER_ID)] if not value])}")
         sys.exit(1)
     
     # More robust continuous processing
