@@ -240,9 +240,22 @@ def process_with_claude(pdf_path, config):
         pdf_base64 = encode_pdf_for_claude(pdf_path)
         
         # Claude client setup - FIXED VERSION
-        try:
-            # For newer versions of the SDK (>= 0.4.0)
-            # Claude client setup - FIXED to avoid proxies error
+try:
+    # For newer versions of the SDK (>= 0.4.0)
+    # Claude client setup - FIXED to avoid proxies error
+    client = anthropic.Anthropic(api_key=api_key)
+except TypeError:
+    # Fall back for older SDK versions
+    try:
+        client = anthropic.Client(api_key=api_key)
+    except:
+        # Last resort fallback
+        import importlib
+        anthropic_module = importlib.import_module('anthropic')
+        if hasattr(anthropic_module, 'Anthropic'):
+            client = anthropic_module.Anthropic(api_key=api_key)
+        else:
+            client = anthropic_module.Client(api_key=api_key)
 try:
     client = anthropic.Anthropic(api_key=api_key)
 except TypeError:
