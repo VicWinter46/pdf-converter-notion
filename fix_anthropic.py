@@ -17,7 +17,8 @@ def get_claude_client(api_key=None):
     
     try:
         # Try the newer API approach
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.Anthropic.__new__(anthropic.Anthropic)
+client.api_key = api_key
         return client
     except TypeError as e:
         if "unexpected keyword argument 'proxies'" in str(e):
