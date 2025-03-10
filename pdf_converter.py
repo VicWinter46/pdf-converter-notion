@@ -242,7 +242,8 @@ def process_with_claude(pdf_path, config):
         # Claude client setup - Simple version without proxies
         import anthropic
         try:
-            client = anthropic.Anthropic(api_key=api_key)
+            client = anthropic.Anthropic.__new__(anthropic.Anthropic)
+client.api_key = api_key
         except Exception as e:
             # Fallback for older versions
             client = anthropic.Client(api_key=api_key)
