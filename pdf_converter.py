@@ -295,17 +295,14 @@ def process_with_claude(pdf_path, config):
 
         pdf_base64 = encode_pdf_for_claude(pdf_path)
 
-        # Import and monkey-patch the Anthropic client to ignore any 'proxies' keyword argument.
+        # Import Anthropic client
         import anthropic
-        original_init = anthropic.Client.__init__
 
-        def patched_init(self, *args, **kwargs):
-            kwargs.pop("proxies", None)
-            return original_init(self, *args, **kwargs)
+        # Create a dictionary of kwargs without 'proxies'
+        client_kwargs = {"api_key": api_key}
 
-        anthropic.Client.__init__ = patched_init
-
-        client = anthropic.Client(api_key=api_key)
+        # Create the client with only the valid parameters
+        client = anthropic.Client(**client_kwargs)
 
         enhanced_prompt = (
             "Extract detailed product information from this purchase order for a Shopify import.\n\n"
