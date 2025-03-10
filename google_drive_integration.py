@@ -1,377 +1,495 @@
+#!/usr/bin/env python3
+"""
+pdf_converter.py
+
+This script converts PDFs into Shopify-compatible CSVs using advanced text extraction and the Anthropic Claude API.
+It extracts text (including vendor hints, image links, and quantity info), sends an enhanced prompt (with the PDF's Base64 string appended)
+to Claude, and then parses the CSV output into a final CSV file for Shopify.
+"""
+
 import os
-import time
-import tempfile
-import logging
+import sys
+import re
 import json
-import pickle
+import csv
+import time
+import base64
+import logging
+import sqlite3
 from datetime import datetime
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-import io
+from io import StringIO
+from pathlib import Path
 
-# Import the PDF converter
-from pdf_converter import pdf_to_shopify_csv, load_config
+import pdfplumber
+import pandas as pd
+from PyPDF2 import PdfReader
 
-# Set up logging
+# Set up logging to file and console
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("pdf_converter.log"),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
-# File to keep track of processed files
-PROCESSED_FILES_RECORD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "processed_files.json")
+# Database setup
+DB_PATH = "file_metadata.db"
 
-# Google Drive folder IDs - can be overridden by environment variables
-TO_CONVERT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_TO_CONVERT_FOLDER_ID", "your-to-convert-folder-id")
-CONVERTED_FOLDER_ID = os.getenv("GOOGLE_DRIVE_CONVERTED_FOLDER_ID", "your-converted-folder-id")
-PROCESSED_FOLDER_ID = os.getenv("GOOGLE_DRIVE_PROCESSED_FOLDER_ID", "your-processed-folder-id")
-
-# If modifying these scopes, delete the token.pickle file.
-SCOPES = ['https://www.googleapis.com/auth/drive']
-
-def load_processed_files():
-    """Load the record of already processed files"""
-    if os.path.exists(PROCESSED_FILES_RECORD):
-        try:
-            with open(PROCESSED_FILES_RECORD, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Error loading processed files record: {str(e)}")
-            return {}
-    return {}
-
-def save_processed_file(file_id, file_name):
-    """Save a record of a processed file"""
-    processed = load_processed_files()
-    processed[file_id] = {
-        "name": file_name,
-        "processed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-    
-    try:
-        with open(PROCESSED_FILES_RECORD, 'w') as f:
-            json.dump(processed, f, indent=2)
-        logger.info(f"Marked file {file_name} as processed")
-    except Exception as e:
-        logger.error(f"Error saving processed file record: {str(e)}")
-
-def get_drive_service():
-    """Get an authorized Google Drive service."""
-    # Debug info
-    print(f"Current working directory: {os.getcwd()}")
-    print(f"Files in current directory: {os.listdir('.')}")
-    print(f"Looking for credentials.json at: {os.path.join(os.getcwd(), 'credentials.json')}")
-    print(f"credentials.json exists: {os.path.exists('credentials.json')}")
-    print(f"token.pickle exists: {os.path.exists('token.pickle')}")
-    
-    creds = None
-    
-    # The token.pickle file stores the user's access and refresh tokens
-    if os.path.exists('token.pickle'):
-        print(f"Current working directory: {os.getcwd()}")
-        print(f"Looking for token.pickle at: {os.path.join(os.getcwd(), 'token.pickle')}")
-        with open('token.pickle', 'rb') as token:
-            creds = pickle.load(token)
-    
-    # If credentials don't exist or are invalid, let the user log in
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not os.path.exists('credentials.json'):
-                logger.error("credentials.json file not found. Please create it first.")
-                return None
-                
-            flow = InstalledAppFlow.from_client_secrets_file(
-                'credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        
-        # Save the credentials for the next run
-        with open('token.pickle', 'wb') as token:
-            pickle.dump(creds, token)
-    
-    try:
-        service = build('drive', 'v3', credentials=creds)
-        logger.info("Successfully authenticated with Google Drive")
-        return service
-    except Exception as e:
-        logger.error(f"Error building Drive service: {str(e)}")
-        return None
-
-def list_files_in_folder(service, folder_id):
-    """List PDF files in a Google Drive folder"""
-    try:
-        results = service.files().list(
-            q=f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false",
-            fields="files(id, name)"
-        ).execute()
-        
-        files = results.get('files', [])
-        logger.info(f"Found {len(files)} PDF files in folder {folder_id}")
-        return files
-    except Exception as e:
-        logger.error(f"Error listing files in folder {folder_id}: {str(e)}")
-        return []
-
-def download_file(service, file_id, file_name):
-    """Download a file from Google Drive"""
-    try:
-        request = service.files().get_media(fileId=file_id)
-        
-        temp_dir = tempfile.gettempdir()
-        file_path = os.path.join(temp_dir, file_name)
-        
-        with io.FileIO(file_path, 'wb') as fh:
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while not done:
-                status, done = downloader.next_chunk()
-        
-        logger.info(f"Downloaded {file_name} to {file_path}")
-        return file_path
-    except Exception as e:
-        logger.error(f"Error downloading file {file_id}: {str(e)}")
-        return None
-
-def upload_file(service, file_path, filename, parent_folder_id):
-    """Upload a file to Google Drive"""
-    try:
-        file_metadata = {
-            'name': filename,
-            'parents': [parent_folder_id]
-        }
-        
-        media = MediaFileUpload(
-            file_path,
-            resumable=True
+def setup_database():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS files (
+            id INTEGER PRIMARY KEY,
+            client TEXT,
+            filename TEXT,
+            status TEXT,
+            uploaded_at TEXT,
+            processed_at TEXT
         )
-        
-        file = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id'
-        ).execute()
-        
-        file_id = file.get('id')
-        logger.info(f"Uploaded {filename} to Google Drive with ID: {file_id}")
-        return file_id
-    except Exception as e:
-        logger.error(f"Error uploading file {filename}: {str(e)}")
-        return None
+    ''')
+    conn.commit()
+    conn.close()
 
-def move_file(service, file_id, new_parent_id):
-    """Move a file to a different folder in Google Drive"""
+setup_database()
+
+def load_config():
+    """
+    Load configuration from config.json or environment variables.
+    Creates a default config file if missing.
+
+    Returns:
+        dict: Configuration dictionary.
+    Raises:
+        ValueError: If anthropic_api_key is missing.
+    """
+    config_path = Path(__file__).parent / "config.json"
+    default_config = {
+        "anthropic_api_key": "",
+        "model": "claude-3-sonnet-20240229",
+        "output_dir": "output",
+        "watch_dir": "watch",
+        "prompt_template": (
+            "Extract product details in CSV format:\n"
+            "Product Title,Body (HTML),Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color\n\n"
+            "If MSRP is missing, use Wholesale Price.\n"
+            "Sizes should be standardized (XS, S, M, L, XL, 0-3 M, 2T, etc.).\n"
+            "Only include Color if multiple colors exist.\n\n"
+            "Return only CSV data."
+        )
+    }
+
+    # Use environment variable if available.
+    if os.getenv("ANTHROPIC_API_KEY"):
+        default_config["anthropic_api_key"] = os.getenv("ANTHROPIC_API_KEY")
+        logger.info("Using Anthropic API key from environment variable.")
+
     try:
-        # First check if the destination folder exists
-        try:
-            service.files().get(fileId=new_parent_id).execute()
-        except Exception as e:
-            logger.error(f"Destination folder {new_parent_id} does not exist: {str(e)}")
-            return False
-            
-        # Get the current parents
-        file = service.files().get(fileId=file_id, fields='parents').execute()
-        previous_parents = ",".join(file.get('parents', []))
-        
-        if not previous_parents:
-            logger.error(f"Could not determine parent folder for file {file_id}")
-            return False
-        
-        # Move the file to the new folder
-        service.files().update(
-            fileId=file_id,
-            addParents=new_parent_id,
-            removeParents=previous_parents,
-            fields='id, parents'
-        ).execute()
-        
-        logger.info(f"Successfully moved file {file_id} to folder {new_parent_id}")
-        return True
+        if config_path.is_file():
+            with config_path.open("r", encoding="utf-8") as f:
+                file_config = json.load(f)
+            default_config.update(file_config)
+        else:
+            with config_path.open("w", encoding="utf-8") as f:
+                json.dump(default_config, f, indent=4)
+            logger.warning(f"Created default config file at {config_path}. Please edit it with your API key.")
     except Exception as e:
-        logger.error(f"Error moving file {file_id}: {str(e)}")
-        return False
+        logger.error(f"Error loading config file: {e}")
 
-def try_alternative_file_handling(service, file_id, file_name):
-    """Try alternative methods to handle a file if moving fails"""
+    if not default_config.get("anthropic_api_key"):
+        msg = f"Missing anthropic_api_key in config file. Please add it to {config_path}"
+        logger.error(msg)
+        raise ValueError(msg)
+
+    os.makedirs(default_config["output_dir"], exist_ok=True)
+    os.makedirs(default_config["watch_dir"], exist_ok=True)
+
+    return default_config
+
+def extract_text_from_pdf(pdf_path):
+    """
+    Extract text from a PDF file, including image links and vendor hints.
+
+    Uses PyPDF2 first to extract text and annotations.
+    Then enhances extraction with pdfplumber for additional clues (e.g., quantities).
+
+    Args:
+        pdf_path (str): Path to the PDF file.
+    Returns:
+        str: Combined extracted text.
+    """
     try:
-        # Try to copy the file to processed folder
-        file_metadata = {
-            'name': file_name,
-            'parents': [PROCESSED_FOLDER_ID]
-        }
-        
-        # Create a copy in the processed folder
-        service.files().copy(fileId=file_id, body=file_metadata).execute()
-        logger.info(f"Copied file {file_id} to processed folder")
-        
-        # Try to trash the original file
-        service.files().update(fileId=file_id, body={'trashed': True}).execute()
-        logger.info(f"Moved original file {file_id} to trash")
-        
-        return True
+        reader = PdfReader(pdf_path)
+        text = ""
+        image_links = []
+        document_images = []
+
+        for page in reader.pages:
+            page_text = page.extract_text() or ""
+            text += page_text + "\n"
+            # Extract annotations safely:
+            annots = page.get("/Annots")
+            if annots:
+                try:
+                    # Resolve indirect objects if needed.
+                    if hasattr(annots, "get_object"):
+                        annots = annots.get_object()
+                    if isinstance(annots, list):
+                        for annot in annots:
+                            try:
+                                obj = annot.get_object() if hasattr(annot, "get_object") else annot
+                                if obj.get("/Subtype") == "/Link" and "/A" in obj and "/URI" in obj["/A"]:
+                                    uri = obj["/A"]["/URI"]
+                                    if uri.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
+                                        image_links.append(uri)
+                            except Exception as ae:
+                                logger.debug(f"Annotation error: {ae}")
+                    else:
+                        logger.debug("Annotations not a list")
+                except Exception as ex:
+                    logger.debug(f"Error processing annotations: {ex}")
+
+        # Look for potential vendor names in the first 20 lines.
+        page_lines = text.split('\n')
+        potential_vendors = []
+        for line in page_lines[:20]:
+            if re.match(r'^[A-Z][A-Z\s]+$', line.strip()) and len(line.strip()) > 3:
+                potential_vendors.append(line.strip())
+
+        # Use regex to search for brand/company information.
+        brand_section_pattern = r'(?:Brand|Company|Vendor)(?:\s+Information)?[:\s]+([A-Za-z0-9\s]+)'
+        brand_matches = re.findall(brand_section_pattern, text, re.IGNORECASE)
+        if brand_matches:
+            potential_vendors.extend(brand_matches)
+
+        vendor_patterns = [
+            r'(?:From|Supplier|Bill\s+from|Sold\s+by|Purchased\s+from)[:\s]+([A-Za-z0-9\s&]+)',
+            r'(?:BILL\s+TO|SHIP\s+FROM)[:\s]+([A-Za-z0-9\s&]+)'
+        ]
+        for pattern in vendor_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            if matches:
+                potential_vendors.extend([m.strip() for m in matches if m.strip()])
+
+        for line in page_lines[:5]:
+            if line.strip() and not re.search(r'invoice|order|po\s+#|date', line.lower()):
+                if len(line.strip()) > 3 and not line.strip().isdigit():
+                    potential_vendors.append(line.strip())
+
+        if potential_vendors:
+            vendor_text = "\n### POTENTIAL VENDORS ###\n"
+            for vendor in potential_vendors:
+                vendor_text += f"POTENTIAL VENDOR: {vendor}\n"
+            text = vendor_text + text
+
+        # Use pdfplumber to extract image placeholders.
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for i, page in enumerate(pdf.pages):
+                    if hasattr(page, "images") and page.images:
+                        for j, _ in enumerate(page.images):
+                            document_images.append(f"IMAGE_{i}_{j}")
+        except Exception as img_err:
+            logger.warning(f"Image extraction error: {img_err}")
+
+        if document_images:
+            text += "\n\n### DOCUMENT CONTAINS IMAGES ###\n"
+            for img_ref in document_images:
+                text += f"IMAGE REFERENCE: {img_ref}\n"
+
+        if image_links:
+            text += "\n\n### IMAGE LINKS ###\n"
+            for link in image_links:
+                text += f"IMAGE URL: {link}\n"
+
+        # Use pdfplumber for extra extraction (e.g., quantities).
+        with pdfplumber.open(pdf_path) as pdf:
+            plumber_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+            size_qty_patterns = [
+                r'(XXS|XS|S|M|L|XL|XXL)\s*[:=]?\s*(\d+)',
+                r'(XXS|XS|S|M|L|XL|XXL)\s+(\d+)',
+                r'Qty\s*[:=]?\s*(\d+)',
+                r'Quantity\s*[:=]?\s*(\d+)'
+            ]
+            quantity_text = "\n### QUANTITY INFORMATION ###\n"
+            has_quantities = False
+            for pattern in size_qty_patterns:
+                qty_matches = re.findall(pattern, plumber_text, re.IGNORECASE)
+                if qty_matches:
+                    has_quantities = True
+                    for match in qty_matches:
+                        if isinstance(match, tuple) and len(match) == 2:
+                            quantity_text += f"SIZE: {match[0]} QTY: {match[1]}\n"
+                        else:
+                            quantity_text += f"QTY: {match}\n"
+            if has_quantities:
+                text += quantity_text
+
+        return text
+
     except Exception as e:
-        logger.error(f"Error in alternative file handling for {file_id}: {str(e)}")
-        return False
+        logger.error(f"Error in PDF extraction: {e}")
+        with pdfplumber.open(pdf_path) as pdf:
+            return "\n".join(page.extract_text() or "" for page in pdf.pages)
 
-def process_pdfs():
-    """Main function to process PDFs from Google Drive"""
-    # Get Drive service
-    service = get_drive_service()
-    if not service:
-        logger.error("Failed to create Google Drive service")
-        return
-    
-    # Load already processed files
-    processed_files = load_processed_files()
-    logger.info(f"Loaded {len(processed_files)} previously processed files")
-    
-    # Get files to process
-    files = list_files_in_folder(service, TO_CONVERT_FOLDER_ID)
-    logger.info(f"Found {len(files)} PDFs in the To-Convert folder")
-    
-    # Filter out already processed files
-    files_to_process = [f for f in files if f['id'] not in processed_files]
-    logger.info(f"Of these, {len(files_to_process)} are new and will be processed")
-    
-    # Process each file
-    for file in files_to_process:
-        file_id = file['id']
-        file_name = file['name']
-        logger.info(f"Processing file: {file_name}")
-        
-        try:
-            # Download the PDF
-            pdf_path = download_file(service, file_id, file_name)
-            if not pdf_path:
-                logger.error(f"Failed to download {file_name}")
-                continue
-            
-            # Convert the PDF
-            config = load_config()
-            csv_path = pdf_to_shopify_csv(pdf_path, config=config)
-            
-            # Upload the CSV
-            csv_filename = os.path.basename(csv_path)
-            upload_success = upload_file(service, csv_path, csv_filename, CONVERTED_FOLDER_ID)
-            
-            if not upload_success:
-                logger.error(f"Failed to upload CSV for {file_name}")
-                continue
-            
-            # Try to move the original PDF to processed folder
-            move_success = move_file(service, file_id, PROCESSED_FOLDER_ID)
-            
-            if not move_success:
-                logger.warning(f"Could not move file {file_id} directly, trying alternative method")
-                alt_success = try_alternative_file_handling(service, file_id, file_name)
-                
-                if not alt_success:
-                    logger.warning(f"All methods to move/handle file {file_id} failed. File will remain in original location.")
-            
-            # Mark as processed regardless of move success
-            save_processed_file(file_id, file_name)
-            
-            # Clean up temporary files
-            if os.path.exists(pdf_path):
-                os.remove(pdf_path)
-            if os.path.exists(csv_path):
-                os.remove(csv_path)
-            
-            logger.info(f"Successfully processed {file_name}")
-        
-        except Exception as e:
-            logger.error(f"Error processing {file_name}: {str(e)}")
+def encode_pdf_for_claude(pdf_path):
+    """
+    Encode the PDF file into a Base64 string.
 
-def cleanup_old_records(days=30):
-    """Clean up old records from the processed files list"""
-    processed = load_processed_files()
-    
-    if not processed:
-        return
-    
-    # Get current time
-    now = datetime.now()
-    
-    # Filter out old records
-    to_keep = {}
-    removed = 0
-    
-    for file_id, info in processed.items():
-        try:
-            processed_time = datetime.strptime(info["processed_at"], "%Y-%m-%d %H:%M:%S")
-            days_old = (now - processed_time).days
-            
-            if days_old <= days:
-                to_keep[file_id] = info
+    Args:
+        pdf_path (str): Path to the PDF.
+    Returns:
+        str: Base64-encoded string.
+    Raises:
+        Exception: If encoding fails.
+    """
+    try:
+        with open(pdf_path, "rb") as pdf_file:
+            return base64.b64encode(pdf_file.read()).decode("utf-8")
+    except Exception as e:
+        logger.error(f"Error encoding PDF: {e}")
+        raise
+
+def process_with_claude(pdf_path, config):
+    """
+    Process the PDF using the Anthropic Claude API to extract detailed CSV data.
+
+    Builds an enhanced prompt with vendor guidance and appends the Base64-encoded PDF.
+    Uses the new completion.create() method. A monkey-patch is applied to remove any 'proxies'
+    keyword argument if present.
+
+    Args:
+        pdf_path (str): Path to the PDF.
+        config (dict): Configuration dictionary.
+    Returns:
+        str: CSV-formatted text from Claude.
+    Raises:
+        Exception: If the API call fails.
+    """
+    try:
+        api_key = os.getenv("ANTHROPIC_API_KEY") or config["anthropic_api_key"]
+        extracted_text = extract_text_from_pdf(pdf_path)
+
+        vendor_info = []
+        for line in extracted_text.split('\n'):
+            if line.startswith("POTENTIAL VENDOR:"):
+                vendor = line.replace("POTENTIAL VENDOR:", "").strip()
+                vendor_info.append(vendor)
+
+        if vendor_info:
+            vendor_guidance = (
+                f"- The document mentions these potential vendors: {', '.join(vendor_info)}\n"
+                "- Identify the CORRECT vendor for each product\n"
+                "- Look at document headers, logos, and branding to determine the true vendor name\n"
+                "- Different products may come from different vendors"
+            )
+        else:
+            vendor_guidance = (
+                "- Look for the vendor/brand name at the top of the document or in headers\n"
+                "- The vendor is typically the company SELLING the products, not the customer\n"
+                "- All products in a PO typically come from the same vendor, but verify this"
+            )
+
+        pdf_base64 = encode_pdf_for_claude(pdf_path)
+
+        # Import and monkey-patch the Anthropic client to ignore any 'proxies' keyword argument.
+        import anthropic
+        original_init = anthropic.Client.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs.pop("proxies", None)
+            return original_init(self, *args, **kwargs)
+
+        anthropic.Client.__init__ = patched_init
+
+        client = anthropic.Client(api_key=api_key)
+
+        enhanced_prompt = (
+            "Extract detailed product information from this purchase order for a Shopify import.\n\n"
+            "### CRITICAL EXTRACTION RULES:\n"
+            "1. VENDOR/BRAND NAME: \n"
+            "   - The vendor name is usually at the top of the document\n"
+            f"   - {vendor_guidance}\n"
+            "   - Do NOT use \"INVOICE\" as the vendor name\n"
+            "   - The vendor is the company MAKING the products, not the customer receiving them\n\n"
+            "2. SIZE EXTRACTION:\n"
+            "   - ONLY extract sizes that have quantities greater than 0\n"
+            "   - Look for sections showing sizes and quantities together\n"
+            "   - Create a separate row for EACH SIZE with a non-zero quantity\n"
+            "   - Skip any sizes that show quantity 0 or no quantity\n"
+            "   - Common sizes include: XXS, XS, S, M, L, XL, XXL\n"
+            "   - IMPORTANT: Return JUST the size value WITHOUT \"Size \" prefix\n\n"
+            "3. TITLE FORMAT:\n"
+            "   - DO NOT use dashes in titles, use spaces instead\n"
+            "   - Use Title Case For All Words\n"
+            "   - Include color in title when available (format: \"in Color\")\n\n"
+            "4. SKU AND STYLE NUMBERS:\n"
+            "   - Use the exact style/item number as the SKU (e.g., \"336537\", \"342348\")\n"
+            "   - Look for numbers following \"Style #\", \"Item #\", or similar labels\n\n"
+            "5. IMAGES: \n"
+            "   - Extract any image URLs if present in the document\n"
+            "   - If no URLs are available, leave the field empty\n\n"
+            "### TABLE FORMAT:\n"
+            "Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product image URL,Quantity\n\n"
+            "Return ONLY properly formatted CSV data with header and data rows. No explanations or other text.\n\n"
+            "Attached PDF (Base64):\n" + pdf_base64
+        )
+
+        response = client.completion.create(
+            prompt=enhanced_prompt,
+            model=config["model"],
+            max_tokens_to_sample=4000,
+            temperature=0.1,
+            stop_sequences=["\n\nHuman:"]
+        )
+        result = response.completion
+
+        if result.startswith("```csv") or result.startswith("```"):
+            result = re.sub(r'^```csv\s*', '', result)
+            result = re.sub(r'^```\s*', '', result)
+            result = re.sub(r'\s*```$', '', result)
+
+        if "Product Title" not in result and "Title" not in result:
+            logger.warning("First extraction attempt yielded poor results, trying backup prompt.")
+            backup_prompt = (
+                "Extract all products from this purchase order into a CSV table.\n\n"
+                "For each product in the PDF:\n"
+                "1. Get the Product Title, Vendor, Product Type, SKU, Price information\n"
+                "2. Extract all sizes with quantities > 0\n"
+                "3. Include colors if available\n"
+                "4. Create a separate row for each size variation\n\n"
+                "Return ONLY the CSV with this header (no explanations):\n"
+                "Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product image URL,Quantity\n\n"
+                "Attached PDF (Base64):\n" + pdf_base64
+            )
+            response = client.completion.create(
+                prompt=backup_prompt,
+                model=config["model"],
+                max_tokens_to_sample=4000,
+                temperature=0.1,
+                stop_sequences=["\n\nHuman:"]
+            )
+            result = response.completion
+            if result.startswith("```csv") or result.startswith("```"):
+                result = re.sub(r'^```csv\s*', '', result)
+                result = re.sub(r'^```\s*', '', result)
+                result = re.sub(r'\s*```$', '', result)
+
+        logger.info("Claude extraction result (first 500 chars): " + (result[:500] + "..." if len(result) > 500 else result))
+        return result
+
+    except Exception as e:
+        logger.error(f"Error processing with Claude: {e}")
+        raise
+
+def parse_csv_data(csv_data):
+    """
+    Parse CSV text into a pandas DataFrame with multiple fallback methods.
+
+    Args:
+        csv_data (str): CSV-formatted text.
+    Returns:
+        pandas.DataFrame: Parsed DataFrame.
+    Raises:
+        Exception: If all parsing attempts fail.
+    """
+    try:
+        csv_lines = csv_data.strip().split('\n')
+        if not csv_lines:
+            raise ValueError("Empty CSV data")
+        header = csv_lines[0]
+        expected_columns = len(header.split(','))
+
+        fixed_lines = [header]
+        for line in csv_lines[1:]:
+            line = line.strip()
+            if not line:
+                continue
+            fields = line.split(',')
+            if len(fields) > expected_columns:
+                fixed_line = []
+                field_buffer = []
+                count = 0
+                for field in fields:
+                    field_buffer.append(field)
+                    count += 1
+                    if count == expected_columns or field == fields[-1]:
+                        fixed_line.extend(field_buffer[:-1])
+                        if field_buffer:
+                            fixed_line.append(" ".join(field_buffer[-1:]))
+                        break
+                fixed_lines.append(",".join(fixed_line))
             else:
-                removed += 1
-        except Exception:
-            # Keep records with invalid dates
-            to_keep[file_id] = info
-    
-    # Save updated records
-    if removed > 0:
+                fixed_lines.append(line)
+        clean_csv = "\n".join(fixed_lines)
+        logger.info("Cleaned CSV data (first 500 chars): " + (clean_csv[:500] + "..." if len(clean_csv) > 500 else clean_csv))
         try:
-            with open(PROCESSED_FILES_RECORD, 'w') as f:
-                json.dump(to_keep, f, indent=2)
-            logger.info(f"Cleaned up {removed} old records from processed files list")
-        except Exception as e:
-            logger.error(f"Error saving cleaned records: {str(e)}")
+            products_df = pd.read_csv(StringIO(clean_csv))
+            return products_df
+        except Exception as first_error:
+            try:
+                logger.info("Standard CSV parsing failed, trying quoting options...")
+                products_df = pd.read_csv(StringIO(clean_csv), quoting=1)
+                return products_df
+            except Exception:
+                try:
+                    logger.info("Trying with on_bad_lines='skip'...")
+                    products_df = pd.read_csv(StringIO(clean_csv), on_bad_lines='skip')
+                    return products_df
+                except Exception:
+                    logger.info("Trying manual parsing...")
+                    header_fields = fixed_lines[0].split(',')
+                    data_rows = []
+                    for line in fixed_lines[1:]:
+                        fields = line.split(',')
+                        # Ensure we have the right number of fields
+                        while len(fields) < len(header_fields):
+                            fields.append('')
+                        if len(fields) > len(header_fields):
+                            fields = fields[:len(header_fields)]
+                        data_rows.append(dict(zip(header_fields, fields)))
+                    
+                    if data_rows:
+                        return pd.DataFrame(data_rows)
+                    else:
+                        raise ValueError("Failed to parse CSV data with all methods")
+    except Exception as e:
+        logger.error(f"Error parsing CSV data: {e}")
 
-def create_credentials_helper():
-    """Helper function to guide users through creating credentials.json"""
-    print("\n========== GOOGLE DRIVE SETUP GUIDE ==========")
-    print("\n1. Go to https://console.developers.google.com/")
-    print("2. Create a new project (or select an existing one)")
-    print("3. Click 'Enable APIs and Services'")
-    print("4. Search for 'Google Drive API' and enable it")
-    print("5. Go to 'Credentials' in the left sidebar")
-    print("6. Click 'Create Credentials' and select 'OAuth client ID'")
-    print("7. Select 'Desktop app' as the Application type")
-    print("8. Name it 'PDF to CSV Converter' and click 'Create'")
-    print("9. Download the JSON file")
-    print("10. Rename it to 'credentials.json' and place it in this directory")
-    print("\nAfter completing these steps, run this script again.")
-    print("==============================================\n")
 
-if __name__ == "__main__":
-    print("PDF to Shopify CSV Converter - Google Drive Integration")
-    
-    # Check if we have credentials.json
-    if not os.path.exists('credentials.json'):
-        create_credentials_helper()
-        exit(1)
-    
-    # Check if we have the required folder IDs
-    if TO_CONVERT_FOLDER_ID == "your-to-convert-folder-id" and not os.getenv("GOOGLE_DRIVE_TO_CONVERT_FOLDER_ID"):
-        print("\nMissing required folder IDs. Please set these environment variables or edit the script:")
-        print("GOOGLE_DRIVE_TO_CONVERT_FOLDER_ID - The folder to watch for new PDFs")
-        print("GOOGLE_DRIVE_CONVERTED_FOLDER_ID - The folder to store converted CSVs")
-        print("GOOGLE_DRIVE_PROCESSED_FOLDER_ID - The folder to move processed PDFs to")
-        print("\nYou can find a folder ID in the URL when you open it in Google Drive:")
-        print("https://drive.google.com/drive/folders/YOUR_FOLDER_ID")
-        exit(1)
-    
-    print("\nStarting PDF converter. Press Ctrl+C to stop.")
-    print(f"To-Convert Folder ID: {TO_CONVERT_FOLDER_ID}")
-    print(f"Converted Folder ID: {CONVERTED_FOLDER_ID}")
-    print(f"Processed Folder ID: {PROCESSED_FOLDER_ID}")
-    
-    # Run in a loop
+import openai
+
+def process_with_openai(text):
+    """
+    Process extracted text with OpenAI to generate structured Shopify CSV output.
+    """
+    openai.api_key = os.getenv("OPENAI_API_KEY")
+
+    prompt = f"""
+    Extract product details in CSV format:
+    Product Title, Vendor, Product Type, SKU, Wholesale Price, MSRP, Size, Color
+
+    - Product Type must be accurately determined from the text.
+    - If MSRP is missing, use Wholesale Price * 2.
+    - Only include Color if multiple colors exist.
+    - Ensure every product has a SKU.
+    - Return only the CSV data.
+
+    Purchase Order Text:
+    {text}
+    """
+
     try:
-        while True:
-            process_pdfs()
-            
-            # Clean up old records once a day (every 24 runs if checking every hour)
-            if datetime.now().hour == 0:
-                cleanup_old_records()
-                
-            next_check = datetime.now().strftime("%H:%M:%S")
-            print(f"Checked for PDFs at {next_check}. Waiting 60 seconds...")
-            time.sleep(60)  # Check every minute
-    
-    except KeyboardInterrupt:
-        print("\nStopping PDF converter.")
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "system", "content": "You are an AI that structures product data into a Shopify CSV."},
+                      {"role": "user", "content": prompt}],
+            temperature=0.2
+        )
+        return response["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"Error processing with OpenAI: {e}")
+        return None
