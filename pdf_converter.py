@@ -227,7 +227,6 @@ def process_with_openai(text, config):
 - All products in a PO typically come from the same vendor, but verify this"""
         
         # Improved prompt with better vendor detection and exact sizing extraction
-        enhanced_prompt = f"""
 enhanced_prompt = f"""
 Extract detailed product information from this purchase order for a Shopify import.
 
