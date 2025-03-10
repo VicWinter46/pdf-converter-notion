@@ -53,6 +53,7 @@ def setup_database():
     ''')
     conn.commit()
     conn.close()
+
 setup_database()
 
 def load_config():
@@ -440,15 +441,4 @@ def parse_csv_data(csv_data):
                     return products_df
                 except Exception:
                     logger.info("Trying manual parsing...")
-                    header_fields = fixed_lines[0].split(',')
-                    header_fields = [field.strip('"').strip() for field in header_fields]
-                    data = []
-                    for line in fixed_lines[1:]:
-                        row = {}
-                        fields = [f.strip('"').strip() for f in line.split(',')]
-                        for j in range(min(len(header_fields), len(fields))):
-                            row[header_fields[j]] = fields[j]
-                        data.append(row)
-                    products_df = pd.DataFrame(data)
-                    return products_df
-    except Exception as e
+                    header_fields = fixed_lines[0].split
