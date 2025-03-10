@@ -239,45 +239,13 @@ def process_with_claude(pdf_path, config):
         # Encode PDF for Claude
         pdf_base64 = encode_pdf_for_claude(pdf_path)
         
-        # Claude client setup - FIXED VERSION
-try:
-    # For newer versions of the SDK (>= 0.4.0)
-    # Claude client setup - FIXED to avoid proxies error
-    client = anthropic.Anthropic(api_key=api_key)
-except Exception as e:
-    # Fallback for older SDK versions
-    try:
-        client = anthropic.Client(api_key=api_key)
-    except Exception:
-        # Last resort fallback
-        import importlib
-        anthropic_module = importlib.import_module('anthropic')
-        if hasattr(anthropic_module, 'Anthropic'):
-            client = anthropic_module.Anthropic(api_key=api_key)
-        else:
-            client = anthropic_module.Client(api_key=api_key)
-try:
-    client = anthropic.Anthropic(api_key=api_key)
-except TypeError:
-    # If that doesn't work, try without any other parameters
-    import importlib
-    anthropic_module = importlib.import_module('anthropic')
-    if hasattr(anthropic_module, 'Anthropic'):
-        client = anthropic_module.Anthropic(api_key=api_key)
-    else:
-        client = anthropic_module.Client(api_key=api_key)
-        except TypeError:
-            # Fall back for possible older SDK versions
-            try:
-                client = anthropic.Client(api_key=api_key)
-            except:
-                # Last resort fallback that should work with both old and new SDK 
-                import importlib
-                anthropic_module = importlib.import_module('anthropic')
-                if hasattr(anthropic_module, 'Anthropic'):
-                    client = anthropic_module.Anthropic(api_key=api_key)
-                else:
-                    client = anthropic_module.Client(api_key=api_key)
+        # Claude client setup - Simple version without proxies
+        import anthropic
+        try:
+            client = anthropic.Anthropic(api_key=api_key)
+        except Exception as e:
+            # Fallback for older versions
+            client = anthropic.Client(api_key=api_key)
         
         # Enhanced prompt for Claude with better extraction guidance
         enhanced_prompt = f"""
@@ -417,7 +385,6 @@ Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product im
     except Exception as e:
         logger.error(f"Error processing with Claude: {str(e)}")
         raise
-
 def parse_csv_data(csv_data):
     """Parse CSV data into a DataFrame with enhanced error handling"""
     try:
