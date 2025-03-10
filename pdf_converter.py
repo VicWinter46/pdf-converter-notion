@@ -92,7 +92,7 @@ def load_config():
                 file_config = json.load(f)
             default_config.update(file_config)
         else:
-            with config_path.open("w", encoding="utf-8") as f):
+            with config_path.open("w", encoding="utf-8") as f:
                 json.dump(default_config, f, indent=4)
             logger.warning(f"Created default config file at {config_path}. Please edit it with your API key.")
     except Exception as e:
@@ -451,3 +451,6 @@ def parse_csv_data(csv_data):
                         data.append(row)
                     products_df = pd.DataFrame(data)
                     return products_df
+    except Exception as e:
+        logger.error(f"Error parsing CSV data: {e}")
+       
