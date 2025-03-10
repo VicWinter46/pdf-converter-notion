@@ -34,7 +34,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 def load_config():
     """
     Load configuration from config.json or environment variables.
@@ -87,7 +86,6 @@ def load_config():
     os.makedirs(default_config["watch_dir"], exist_ok=True)
 
     return default_config
-
 
 def extract_text_from_pdf(pdf_path):
     """
@@ -215,7 +213,6 @@ def extract_text_from_pdf(pdf_path):
         with pdfplumber.open(pdf_path) as pdf:
             return "\n".join(page.extract_text() or "" for page in pdf.pages)
 
-
 def encode_pdf_for_claude(pdf_path):
     """
     Encode the PDF file into a Base64 string.
@@ -233,7 +230,6 @@ def encode_pdf_for_claude(pdf_path):
     except Exception as e:
         logger.error(f"Error encoding PDF: {e}")
         raise
-
 
 def process_with_claude(pdf_path, config):
     """
@@ -367,7 +363,6 @@ def process_with_claude(pdf_path, config):
         logger.error(f"Error processing with Claude: {e}")
         raise
 
-
 def parse_csv_data(csv_data):
     """
     Parse CSV text into a pandas DataFrame with multiple fallback methods.
@@ -440,7 +435,6 @@ def parse_csv_data(csv_data):
         logger.error("Raw CSV data for debugging: " + (csv_data[:500] + "..." if len(csv_data) > 500 else csv_data))
         raise
 
-
 def post_process_data(products_df):
     """
     Apply additional cleaning and standardization to the DataFrame.
@@ -451,284 +445,4 @@ def post_process_data(products_df):
     Args:
         products_df (pandas.DataFrame): Input DataFrame.
     Returns:
-        pandas.DataFrame: Post-processed DataFrame.
-    """
-    try:
-        if "Size" in products_df.columns:
-            size_mapping = {
-                "XSMALL": "XS",
-                "SMALL": "S",
-                "MEDIUM": "M",
-                "LARGE": "L",
-                "XLARGE": "XL",
-                "XXSMALL": "XXS",
-                "XXLARGE": "XXL",
-            }
-            for idx, row in products_df.iterrows():
-                size = str(row["Size"]).strip().upper()
-                if size in size_mapping:
-                    products_df.at[idx, "Size"] = size_mapping[size]
-
-        if all(col in products_df.columns for col in ["Product Title", "Size", "SKU"]):
-            products_df["_temp_key"] = products_df["SKU"].astype(str) + ":" + products_df["Size"].astype(str)
-            if products_df["_temp_key"].duplicated().any():
-                logger.warning("Found duplicate product-size combinations, removing duplicates")
-                products_df = products_df.drop_duplicates(subset="_temp_key")
-            products_df = products_df.drop(columns=["_temp_key"])
-
-        if "Vendor" in products_df.columns:
-            for idx, row in products_df.iterrows():
-                vendor = str(row["Vendor"]).strip()
-                if vendor.upper() == "INVOICE":
-                    sku = str(row.get("SKU", "")).lower()
-                    title = str(row.get("Title", "")).lower()
-                    if any(pattern in sku for pattern in ["roscoe", "blazer", "buddy"]):
-                        products_df.at[idx, "Vendor"] = "Bailey Boys"
-                    elif "bunny" in title or "bunny" in sku:
-                        products_df.at[idx, "Vendor"] = "Bunnies By The Bay"
-            size_pattern = r'(XXS|XS|S|M|L|XL|XXL)'
-            for idx, row in products_df.iterrows():
-                vendor = row.get("Vendor", "")
-                if pd.notna(vendor) and re.search(size_pattern, str(vendor)):
-                    parts = re.split(size_pattern, str(vendor))
-                    if parts and parts[0].strip():
-                        products_df.at[idx, "Vendor"] = parts[0].strip()
-
-        if "Option1 value" in products_df.columns:
-            for idx, row in products_df.iterrows():
-                size = str(row["Option1 value"]).strip()
-                if size.startswith("Size "):
-                    size = size.replace("Size ", "")
-                products_df.at[idx, "Option1 value"] = size
-
-        if "Product image URL" in products_df.columns:
-            valid_urls = {}
-            for idx, row in products_df.iterrows():
-                if "SKU" in row and pd.notna(row["SKU"]) and "Product image URL" in row:
-                    url = row["Product image URL"]
-                    if pd.notna(url) and str(url).strip():
-                        valid_urls[row["SKU"]] = url
-            for idx, row in products_df.iterrows():
-                sku = row.get("SKU", None)
-                if sku and sku in valid_urls:
-                    products_df.at[idx, "Product image URL"] = valid_urls[sku]
-
-        if "Quantity" in products_df.columns:
-            logger.info("Removing products with 0 quantity")
-            products_df["Quantity"] = pd.to_numeric(products_df["Quantity"], errors='coerce')
-            products_df = products_df[products_df["Quantity"] > 0]
-
-        return products_df
-
-    except Exception as e:
-        logger.error(f"Error in post-processing: {e}")
-        return products_df
-
-
-def format_for_shopify(products_df):
-    """
-    Map and format the DataFrame for Shopify import.
-
-    Args:
-        products_df (pandas.DataFrame): Input DataFrame.
-    Returns:
-        pandas.DataFrame: Formatted DataFrame.
-    """
-    try:
-        products_df = post_process_data(products_df)
-        logger.info(f"DataFrame columns: {products_df.columns.tolist()}")
-
-        required_columns = ["Product Title", "Vendor", "Product Type", "SKU", "Wholesale Price", "MSRP", "Size", "Color"]
-        for col in required_columns:
-            if col not in products_df.columns:
-                products_df[col] = None
-                logger.info(f"Added missing column: {col}")
-
-        for price_col in ["Wholesale Price", "MSRP"]:
-            if price_col in products_df.columns:
-                products_df[price_col] = products_df[price_col].apply(
-                    lambda x: float(str(x).replace('USD', '').replace('$', '').strip()) if pd.notna(x) and str(x).strip() != '' else None
-                )
-
-        shopify_df = pd.DataFrame()
-        column_mapping = {
-            "Product Title": "Title",
-            "Title": "Title",
-            "SKU": "SKU",
-            "Vendor": "Vendor",
-            "Product Type": "Type",
-            "Type": "Type",
-            "Wholesale Price": "Cost per item",
-            "Cost": "Cost per item",
-            "MSRP": "Price",
-            "Price": "Price",
-            "Size": "Option1 value",
-            "Color": "Option2 value",
-            "Product image URL": "Product image URL"
-        }
-
-        for old_col, new_col in column_mapping.items():
-            if old_col in products_df.columns:
-                shopify_df[new_col] = products_df[old_col]
-                logger.info(f"Mapped {old_col} to {new_col}")
-
-        if "Title" in shopify_df.columns:
-            shopify_df["URL handle"] = shopify_df["Title"].astype(str).str.lower() \
-                .str.replace(' ', '-', regex=False) \
-                .str.replace('[^a-z0-9-]', '', regex=True)
-            shopify_df["Description"] = shopify_df["Title"]
-        else:
-            logger.error("Title column not found in DataFrame")
-            shopify_df["URL handle"] = ""
-            shopify_df["Description"] = ""
-
-        shopify_df["Status"] = "draft"
-        shopify_df["Option1 name"] = "Size"
-        shopify_df["Option2 name"] = "Color"
-        shopify_df["Continue selling when out of stock"] = "FALSE"
-
-        if "Price" not in shopify_df.columns and "Cost per item" in shopify_df.columns:
-            shopify_df["Price"] = shopify_df["Cost per item"].apply(
-                lambda x: float(x) * 2 if pd.notna(x) and x != '' else None
-            )
-
-        shopify_columns = [
-            "Title", "URL handle", "Description", "Vendor", "Type",
-            "Status", "SKU", "Option1 name", "Option1 value",
-            "Option2 name", "Option2 value", "Price", "Cost per item",
-            "Continue selling when out of stock", "Product image URL"
-        ]
-        for col in shopify_columns:
-            if col not in shopify_df.columns:
-                shopify_df[col] = ""
-                logger.info(f"Added empty column: {col}")
-
-        logger.info(f"Final DataFrame columns: {shopify_df.columns.tolist()}")
-        logger.info(f"DataFrame shape: {shopify_df.shape}")
-        shopify_csv = shopify_df[shopify_columns]
-        return shopify_csv
-
-    except Exception as e:
-        logger.error(f"Error formatting for Shopify: {e}")
-        logger.error(f"DataFrame info: {type(products_df)}")
-        if isinstance(products_df, pd.DataFrame):
-            logger.error(f"DataFrame columns: {products_df.columns.tolist()}")
-            logger.error(f"DataFrame sample: {products_df.head().to_dict()}")
-        raise
-
-
-def pdf_to_shopify_csv(pdf_path, output_path=None, config=None):
-    """
-    Convert a PDF to a Shopify-compatible CSV using the Claude API.
-
-    Args:
-        pdf_path (str): Path to the PDF.
-        output_path (str, optional): Where to save the CSV.
-        config (dict, optional): Configuration dictionary.
-    Returns:
-        str: Path to the saved CSV file.
-    Raises:
-        Exception: If conversion fails.
-    """
-    if config is None:
-        config = load_config()
-
-    if output_path is None:
-        pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = os.path.join(config["output_dir"], f"{pdf_name}_{timestamp}.csv")
-
-    try:
-        logger.info(f"Processing PDF: {pdf_path}")
-        csv_data = process_with_claude(pdf_path, config)
-        products_df = parse_csv_data(csv_data)
-        shopify_csv = format_for_shopify(products_df)
-        shopify_csv.to_csv(output_path, index=False)
-        logger.info(f"Successfully converted {pdf_path} to {output_path}")
-        return output_path
-    except Exception as e:
-        logger.error(f"Error converting PDF to CSV: {e}")
-        raise
-
-
-def process_directory(directory=None, config=None):
-    """
-    Process all PDFs in a directory and move processed files to a subfolder.
-
-    Args:
-        directory (str, optional): Directory to search for PDFs.
-        config (dict, optional): Configuration dictionary.
-    Returns:
-        list: Details of processed PDFs.
-    """
-    if config is None:
-        config = load_config()
-
-    if directory is None:
-        directory = config["watch_dir"]
-
-    logger.info(f"Processing directory: {directory}")
-    pdf_files = [os.path.join(directory, f) for f in os.listdir(directory)
-                 if f.lower().endswith('.pdf') and os.path.isfile(os.path.join(directory, f))]
-    results = []
-    for pdf_file in pdf_files:
-        try:
-            output_path = pdf_to_shopify_csv(pdf_file, config=config)
-            results.append({"input": pdf_file, "output": output_path, "success": True})
-            processed_dir = os.path.join(directory, "processed")
-            os.makedirs(processed_dir, exist_ok=True)
-            processed_path = os.path.join(processed_dir, os.path.basename(pdf_file))
-            os.rename(pdf_file, processed_path)
-        except Exception as e:
-            logger.error(f"Failed to process {pdf_file}: {e}")
-            results.append({"input": pdf_file, "error": str(e), "success": False})
-    return results
-
-
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="Convert PDFs to Shopify-compatible CSVs using Claude")
-    parser.add_argument("--pdf", help="Path to a single PDF file to convert")
-    parser.add_argument("--output", help="Output path for the CSV file")
-    parser.add_argument("--dir", help="Directory containing PDFs to convert")
-    parser.add_argument("--watch", action="store_true", help="Watch directory for new PDFs")
-    args = parser.parse_args()
-
-    try:
-        config = load_config()
-        if args.pdf:
-            pdf_to_shopify_csv(args.pdf, args.output, config)
-        elif args.dir:
-            process_directory(args.dir, config)
-        elif args.watch:
-            from watchdog.observers import Observer
-            from watchdog.events import FileSystemEventHandler
-
-            class PDFHandler(FileSystemEventHandler):
-                def on_created(self, event):
-                    if event.is_directory:
-                        return
-                    if event.src_path.lower().endswith('.pdf'):
-                        logger.info(f"New PDF detected: {event.src_path}")
-                        try:
-                            pdf_to_shopify_csv(event.src_path, config=config)
-                        except Exception as e:
-                            logger.error(f"Error processing new PDF: {e}")
-
-            watch_dir = config["watch_dir"]
-            logger.info(f"Watching directory: {watch_dir}")
-            event_handler = PDFHandler()
-            observer = Observer()
-            observer.schedule(event_handler, watch_dir, recursive=False)
-            observer.start()
-            try:
-                while True:
-                    time.sleep(1)
-            except KeyboardInterrupt:
-                observer.stop()
-            observer.join()
-        else:
-            process_directory(config=config)
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        sys.exit(1)
+        pandas.DataFrame: Post-
