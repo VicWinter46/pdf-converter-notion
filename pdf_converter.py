@@ -239,8 +239,22 @@ def process_with_claude(pdf_path, config):
         # Encode PDF for Claude
         pdf_base64 = encode_pdf_for_claude(pdf_path)
         
-        # Claude client setup
-        client = anthropic.Anthropic(api_key=api_key)
+        # Claude client setup - FIXED VERSION
+        try:
+            # For newer versions of the SDK (>= 0.4.0)
+            client = anthropic.Anthropic(api_key=api_key)
+        except TypeError:
+            # Fall back for possible older SDK versions
+            try:
+                client = anthropic.Client(api_key=api_key)
+            except:
+                # Last resort fallback that should work with both old and new SDK 
+                import importlib
+                anthropic_module = importlib.import_module('anthropic')
+                if hasattr(anthropic_module, 'Anthropic'):
+                    client = anthropic_module.Anthropic(api_key=api_key)
+                else:
+                    client = anthropic_module.Client(api_key=api_key)
         
         # Enhanced prompt for Claude with better extraction guidance
         enhanced_prompt = f"""
