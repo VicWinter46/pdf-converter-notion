@@ -310,103 +310,75 @@ def format_for_shopify(products_df):
         # Print column names for debugging
         logger.info(f"DataFrame columns: {products_df.columns.tolist()}")
         
-        # Ensure required columns exist
-        required_columns = ["Product Title", "Vendor", "Product Type", "SKU", "Wholesale Price", "MSRP", "Size", "Color"]
-        for col in required_columns:
-            if col not in products_df.columns:
-                products_df[col] = None
-                logger.info(f"Added missing column: {col}")
-        
-        # Clean up price values and ensure consistent formatting
-        for price_col in ["Wholesale Price", "MSRP"]:
-            if price_col in products_df.columns:
-                # Convert any price strings to numeric values
-                products_df[price_col] = products_df[price_col].apply(
-                    lambda x: float(str(x).replace('USD', '').replace('$', '').strip()) if pd.notna(x) and str(x).strip() != '' else None
-                )
-        
-        # Calculate price (use MSRP if available, otherwise use Wholesale Price * 2)
-        def calculate_price(row):
-            try:
-                if "MSRP" in row and pd.notna(row["MSRP"]) and row["MSRP"] != 0:
-                    return float(row["MSRP"])
-                elif "Wholesale Price" in row and pd.notna(row["Wholesale Price"]):
-                    return float(row["Wholesale Price"]) * 2
-                else:
-                    return None
-            except:
-                return None
-        
-        # Create new DataFrame with Shopify columns
-        shopify_df = pd.DataFrame()
-        
-        # Map columns to Shopify format - with flexible naming
-        column_mapping = {
-            "Product Title": "Title",
-            "Title": "Title",  # In case it's already named "Title"
-            "SKU": "SKU", 
-            "Vendor": "Vendor",
-            "Product Type": "Type",
-            "Type": "Type",  # In case it's already named "Type"
-            "Wholesale Price": "Cost per item",
-            "Cost": "Cost per item",  # Alternative naming
-            "MSRP": "Price",
-            "Price": "Price",  # In case it's already named "Price"
-            "Size": "Option1 value",
-            "Color": "Option2 value",
-            "Product image URL": "Product image URL"
-        }
-        
-        # Map existing columns
-        for old_col, new_col in column_mapping.items():
-            if old_col in products_df.columns:
-                shopify_df[new_col] = products_df[old_col]
-                logger.info(f"Mapped {old_col} to {new_col}")
-        
-        # Set default values for required fields
-        if "Title" in shopify_df.columns:
-            shopify_df["URL handle"] = shopify_df["Title"].astype(str).str.lower().str.replace(' ', '-').str.replace('[^a-z0-9-]', '', regex=True)
-            shopify_df["Description"] = shopify_df["Title"]  # As requested, just use title for description
-        else:
-            logger.error("Title column not found in DataFrame")
-            shopify_df["URL handle"] = ""
-            shopify_df["Description"] = ""
-        
-        shopify_df["Status"] = "draft"  # Set status to draft
-        shopify_df["Option1 name"] = "Size"  # Default option name
-        shopify_df["Option2 name"] = "Color"  # Default option name
-        shopify_df["Continue selling when out of stock"] = "deny"  # Change to deny
-        shopify_df["Inventory Tracker"] = "shopify"  # Set to shopify
-        shopify_df["Inventory Quantity"] = ""  # Leave blank
-        
-        # Make sure we have a price
-        if "Price" not in shopify_df.columns and "Cost per item" in shopify_df.columns:
-            # If no MSRP was found, use Cost per item * 2
-            shopify_df["Price"] = shopify_df["Cost per item"].apply(
-                lambda x: float(x) * 2 if pd.notna(x) and x != '' else None
-            )
-        
-        # Select columns for Shopify
-        shopify_columns = [
-            "Title", "URL handle", "Description", "Vendor", "Type", 
-            "Status", "SKU", "Option1 name", "Option1 value", 
+        # Create new DataFrame for Shopify with the required structure
+        shopify_data = []
+
+        # Iterate through products to create main and variant rows
+        for idx, product in products_df.iterrows():
+            # Main product row
+            main_row = {
+                "Title": product["Product Title"],
+                "URL handle": product["Product Title"].lower().replace(" ", "-"),
+                "Description": product.get("Description", ""),
+                "Vendor": product["Vendor"],
+                "Type": product["Product Type"],
+                "Status": "active",
+                "Option1 name": "Size" if "Size" in product else "Title",
+                "Option1 value": product.get("Size", product["Product Title"]),
+                "Product image URL": product.get("Product image URL", ""),
+                "SKU": "",
+                "Price": "",
+                "Cost per item": "",
+                "Inventory tracker": "",
+                "Inventory quantity": "",
+                "Option2 name": "",
+                "Option2 value": "",
+                "Continue selling when out of stock": ""
+            }
+            shopify_data.append(main_row)
+
+            # Variant rows if there are additional sizes/colors
+            if "Size" in product or "Color" in product:
+                variant_row = {
+                    "Title": "",
+                    "URL handle": product["Product Title"].lower().replace(" ", "-"),
+                    "Description": "",
+                    "Vendor": "",
+                    "Type": "",
+                    "Status": "",
+                    "SKU": product["SKU"],
+                    "Option1 name": "Size" if "Size" in product else "",
+                    "Option1 value": product.get("Size", ""),
+                    "Option2 name": "Color" if "Color" in product else "",
+                    "Option2 value": product.get("Color", ""),
+                    "Price": product["MSRP"] if pd.notna(product["MSRP"]) else product["Wholesale Price"] * 2,
+                    "Cost per item": product["Wholesale Price"],
+                    "Inventory tracker": "shopify",
+                    "Inventory quantity": product["Quantity"],
+                    "Continue selling when out of stock": "deny",
+                    "Product image URL": ""
+                }
+                shopify_data.append(variant_row)
+
+        # Convert list of dictionaries to DataFrame
+        shopify_df = pd.DataFrame(shopify_data)
+
+        # Ensure all required columns are present
+        required_columns = [
+            "Title", "URL handle", "Description", "Vendor", "Type",
+            "Status", "SKU", "Option1 name", "Option1 value",
             "Option2 name", "Option2 value", "Price", "Cost per item",
-            "Continue selling when out of stock", "Product image URL", "Inventory Tracker", "Inventory Quantity"
+            "Inventory tracker", "Inventory quantity", "Continue selling when out of stock", "Product image URL"
         ]
-        
-        # For any missing columns in the requested list, add them with empty values
-        for col in shopify_columns:
+        for col in required_columns:
             if col not in shopify_df.columns:
                 shopify_df[col] = ""
-                logger.info(f"Added empty column: {col}")
-        
+
         # Log DataFrame information
         logger.info(f"Final DataFrame columns: {shopify_df.columns.tolist()}")
         logger.info(f"DataFrame shape: {shopify_df.shape}")
         
-        # Create final CSV
-        shopify_csv = shopify_df[shopify_columns]
-        return shopify_csv
+        return shopify_df
     
     except Exception as e:
         logger.error(f"Error formatting for Shopify: {str(e)}")
