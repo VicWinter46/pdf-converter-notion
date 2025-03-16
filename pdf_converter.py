@@ -693,7 +693,7 @@ def format_for_shopify(products_df):
         shopify_df["Status"] = "draft"  # Set status to draft
         shopify_df["Option1 name"] = "Size"  # Default option name
         shopify_df["Option2 name"] = "Color"  # Default option name
-        shopify_df["Continue selling when out of stock"] = "FALSE"
+        shopify_df["Continue selling when out of stock"] = "DENY"
         
         # Make sure we have a price
         if "Price" not in shopify_df.columns and "Cost per item" in shopify_df.columns:
