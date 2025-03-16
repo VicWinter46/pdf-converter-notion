@@ -230,6 +230,9 @@ Extract detailed product information from this purchase order for a Shopify impo
    - Extract any image URLs if present in the document
    - If no URLs are available, leave the field empty
 
+5. PRODUCT TITLE:
+   - Capitalize each word in the product title (e.g., "summer dress" should become "Summer Dress")
+
 ### TABLE FORMAT:
 Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product image URL,Quantity
 
@@ -273,14 +276,13 @@ IMPORTANT:
 
 3. Carefully identify the correct vendor name from the document header or branding
 
-Look for sections that show quantities for each size and carefully extract only sizes with quantities > 0.
+4. Capitalize each word in the product title (e.g., "summer dress" should become "Summer Dress")
 
 Here's the purchase order to analyze:
 {text}
 
 Return ONLY the CSV with this header (include Quantity column):
-Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product image URL,Quantity
-"""
+Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product image URL,Quantity"""
             
             response = openai.ChatCompletion.create(
                 model=config["model"],
@@ -297,6 +299,120 @@ Product Title,Vendor,Product Type,SKU,Wholesale Price,MSRP,Size,Color,Product im
     
     except Exception as e:
         logger.error(f"Error processing with OpenAI: {str(e)}")
+        raise
+
+def format_for_shopify(products_df):
+    """Format the DataFrame for Shopify import with improved handling"""
+    try:
+        # Apply post-processing to fix common issues
+        products_df = post_process_data(products_df)
+        
+        # Print column names for debugging
+        logger.info(f"DataFrame columns: {products_df.columns.tolist()}")
+        
+        # Ensure required columns exist
+        required_columns = ["Product Title", "Vendor", "Product Type", "SKU", "Wholesale Price", "MSRP", "Size", "Color"]
+        for col in required_columns:
+            if col not in products_df.columns:
+                products_df[col] = None
+                logger.info(f"Added missing column: {col}")
+        
+        # Clean up price values and ensure consistent formatting
+        for price_col in ["Wholesale Price", "MSRP"]:
+            if price_col in products_df.columns:
+                # Convert any price strings to numeric values
+                products_df[price_col] = products_df[price_col].apply(
+                    lambda x: float(str(x).replace('USD', '').replace('$', '').strip()) if pd.notna(x) and str(x).strip() != '' else None
+                )
+        
+        # Calculate price (use MSRP if available, otherwise use Wholesale Price * 2)
+        def calculate_price(row):
+            try:
+                if "MSRP" in row and pd.notna(row["MSRP"]) and row["MSRP"] != 0:
+                    return float(row["MSRP"])
+                elif "Wholesale Price" in row and pd.notna(row["Wholesale Price"]):
+                    return float(row["Wholesale Price"]) * 2
+                else:
+                    return None
+            except:
+                return None
+        
+        # Create new DataFrame with Shopify columns
+        shopify_df = pd.DataFrame()
+        
+        # Map columns to Shopify format - with flexible naming
+        column_mapping = {
+            "Product Title": "Title",
+            "Title": "Title",  # In case it's already named "Title"
+            "SKU": "SKU", 
+            "Vendor": "Vendor",
+            "Product Type": "Type",
+            "Type": "Type",  # In case it's already named "Type"
+            "Wholesale Price": "Cost per item",
+            "Cost": "Cost per item",  # Alternative naming
+            "MSRP": "Price",
+            "Price": "Price",  # In case it's already named "Price"
+            "Size": "Option1 value",
+            "Color": "Option2 value",
+            "Product image URL": "Product image URL"
+        }
+        
+        # Map existing columns
+        for old_col, new_col in column_mapping.items():
+            if old_col in products_df.columns:
+                shopify_df[new_col] = products_df[old_col]
+                logger.info(f"Mapped {old_col} to {new_col}")
+        
+        # Set default values for required fields
+        if "Title" in shopify_df.columns:
+            shopify_df["URL handle"] = shopify_df["Title"].astype(str).str.lower().str.replace(' ', '-').str.replace('[^a-z0-9-]', '', regex=True)
+            shopify_df["Description"] = shopify_df["Title"]  # As requested, just use title for description
+        else:
+            logger.error("Title column not found in DataFrame")
+            shopify_df["URL handle"] = ""
+            shopify_df["Description"] = ""
+        
+        shopify_df["Status"] = "draft"  # Set status to draft
+        shopify_df["Option1 name"] = "Size"  # Default option name
+        shopify_df["Option2 name"] = "Color"  # Default option name
+        shopify_df["Continue selling when out of stock"] = "deny"  # Change to deny
+        
+        # Make sure we have a price
+        if "Price" not in shopify_df.columns and "Cost per item" in shopify_df.columns:
+            # If no MSRP was found, use Cost per item * 2
+            shopify_df["Price"] = shopify_df["Cost per item"].apply(
+                lambda x: float(x) * 2 if pd.notna(x) and x != '' else None
+            )
+        
+        # Select columns for Shopify
+        shopify_columns = [
+            "Title", "URL handle", "Description", "Vendor", "Type", 
+            "Status", "SKU", "Option1 name", "Option1 value", 
+            "Option2 name", "Option2 value", "Price", "Cost per item",
+            "Continue selling when out of stock", "Product image URL"
+        ]
+        
+        # For any missing columns in the requested list, add them with empty values
+        for col in shopify_columns:
+            if col not in shopify_df.columns:
+                shopify_df[col] = ""
+                logger.info(f"Added empty column: {col}")
+        
+        # Log DataFrame information
+        logger.info(f"Final DataFrame columns: {shopify_df.columns.tolist()}")
+        logger.info(f"DataFrame shape: {shopify_df.shape}")
+        
+        # Create final CSV
+        shopify_csv = shopify_df[shopify_columns]
+        return shopify_csv
+    
+    except Exception as e:
+        logger.error(f"Error formatting for Shopify: {str(e)}")
+        # Print more debug info
+        logger.error(f"DataFrame info: {type(products_df)}")
+        if isinstance(products_df, pd.DataFrame):
+            logger.error(f"DataFrame columns: {products_df.columns.tolist()}")
+            logger.error(f"DataFrame sample: {products_df.head().to_dict()}")
         raise
 
 def parse_csv_data(csv_data):
